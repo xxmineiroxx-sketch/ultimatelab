@@ -54,7 +54,7 @@ export default function Features() {
           className="text-center mb-16"
         >
           <h2 className="text-4xl md:text-5xl font-bold mb-6">
-            Why Choose <span className="gradient-text">Ultimatelabs</span>?
+            Why Choose <span className="gradient-text">Ultimatelab</span>?
           </h2>
           <p className="text-xl text-gray-400 max-w-3xl mx-auto">
             Built by musicians for musicians, our ecosystem combines cutting-edge AI 

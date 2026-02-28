@@ -8,7 +8,7 @@ export default function Footer() {
           <div className="md:col-span-2">
             <div className="flex items-center space-x-3 mb-4">
               <Music className="w-8 h-8 text-purple-400" />
-              <span className="text-2xl font-bold gradient-text">Ultimatelabs</span>
+              <span className="text-2xl font-bold gradient-text">Ultimatelab</span>
             </div>
             <p className="text-gray-400 max-w-md">
               The ultimate ecosystem for modern music creators. Professional AI-powered tools 
@@ -42,7 +42,7 @@ export default function Footer() {
             <span>for musicians everywhere</span>
           </p>
           <p className="text-gray-500 text-sm mt-2">
-            © 2024 Ultimatelabs. All rights reserved.
+            © 2024 Ultimatelab. All rights reserved.
           </p>
         </div>
       </div>

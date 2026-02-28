@@ -22,7 +22,7 @@ export default function Hero() {
           </div>
 
           <h1 className="text-5xl md:text-7xl font-bold">
-            <span className="gradient-text">Ultimatelabs</span>
+            <span className="gradient-text">Ultimatelab</span>
           </h1>
 
           <p className="text-xl md:text-2xl text-gray-300 max-w-3xl mx-auto">

@@ -1,4 +1,4 @@
-name = "ultimatelabs"
+name = "ultimatelab"
 compatibility_date = "2024-01-01"
 
 [build]
@@ -8,5 +8,5 @@ command = "npm install && npm run build"
 dir = "dist"
 
 [[routes]]
-pattern = "ultimatelabs.com"
+pattern = "ultimatelab.co"
 custom_domain = true
