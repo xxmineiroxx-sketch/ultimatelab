@@ -1,0 +1,12 @@
+name = "ultimatelabs"
+compatibility_date = "2024-01-01"
+
+[build]
+command = "npm install && npm run build"
+
+[build.upload]
+dir = "dist"
+
+[[routes]]
+pattern = "ultimatelabs.com"
+custom_domain = true
