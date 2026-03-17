@@ -44,6 +44,15 @@ function makeId(len = 24) {
   return id;
 }
 
+const RESET_CODE_TTL_MS = 15 * 60 * 1000;
+
+function makeNumericCode(len = 6) {
+  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  let code = '';
+  for (const byte of bytes) code += String(byte % 10);
+  return code.padEnd(len, '0').slice(0, len);
+}
+
 async function kvGet(env, key, fallback) {
   const raw = await env.STORE.get(key);
   if (!raw) return fallback;
@@ -54,8 +63,74 @@ async function kvPut(env, key, value) {
   await env.STORE.put(key, JSON.stringify(value));
 }
 
+async function kvDelete(env, key) {
+  await env.STORE.delete(key);
+}
+
 function orgKey(orgId, type) {
   return `org:${orgId}:${type}`;
+}
+
+function passwordResetKey(orgId, email) {
+  return `${orgKey(orgId, 'passwordReset')}:${email}`;
+}
+
+function passwordResetEmailHtml({ name, code, orgName }) {
+  const safeName = name || 'there';
+  const safeOrgName = orgName || 'your team';
+  return `
+    <div style="background:#020617;padding:40px;font-family:sans-serif;color:#F9FAFB;max-width:480px;margin:auto;border-radius:16px">
+      <p style="color:#818CF8;font-weight:700;font-size:13px;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px">CineStage™</p>
+      <h1 style="font-size:26px;margin:0 0 12px">Reset your password</h1>
+      <p style="color:#9CA3AF;margin:0 0 16px">Hi ${safeName}, use this code to reset your Ultimate Playback password for ${safeOrgName}. It expires in 15 minutes.</p>
+      <div style="background:#0B1120;border:1px solid #1F2937;border-radius:12px;padding:24px;text-align:center;margin-bottom:24px">
+        <span style="font-size:48px;font-weight:900;letter-spacing:12px;color:#818CF8">${code}</span>
+      </div>
+      <p style="color:#4B5563;font-size:12px;margin:0">If you did not request this reset, you can ignore this email.</p>
+    </div>
+  `;
+}
+
+async function sendPasswordResetEmail(env, { to, name, code, orgName }) {
+  const resendApiKey = env.RESEND_API_KEY || '';
+  const fromEmail = env.FROM_EMAIL || '';
+  const fromName = env.FROM_EMAIL_NAME || 'CineStage';
+
+  if (!resendApiKey || !fromEmail) {
+    throw new Error('Password reset email is not configured');
+  }
+
+  const subject = `${code} is your Ultimate Playback reset code`;
+  const text = [
+    `Hi ${name || 'there'},`,
+    '',
+    `Use this code to reset your Ultimate Playback password for ${orgName || 'your team'}: ${code}`,
+    '',
+    'This code expires in 15 minutes.',
+    '',
+    "If you did not request this reset, you can ignore this email.",
+  ].join('\n');
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${resendApiKey}`,
+    },
+    body: JSON.stringify({
+      from: `${fromName} <${fromEmail}>`,
+      to: [to],
+      subject,
+      html: passwordResetEmailHtml({ name, code, orgName }),
+      text,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    console.log('[sync/auth/forgot-password] resend failed', detail);
+    throw new Error('Failed to send password reset email');
+  }
 }
 
 // ── Identifier resolution (email or phone → canonical email) ──────────────
@@ -75,17 +150,26 @@ function isEmail(str) {
  */
 async function resolveIdentifier(env, orgId, raw) {
   const trimmed = raw.trim();
+  const people = await kvGet(env, orgKey(orgId, 'people'), []);
+
   if (isEmail(trimmed)) {
-    return { canonicalEmail: trimmed.toLowerCase(), phone: null };
+    const canonicalEmail = trimmed.toLowerCase();
+    const person = people.find(p => (p.email || '').toLowerCase() === canonicalEmail);
+    return {
+      canonicalEmail,
+      phone: person?.phone ? normalizePhone(person.phone) : null,
+      personPhone: person?.phone || null,
+      personName: person?.name || null,
+    };
   }
   // Phone path: normalize digits and search people list
   const phone = normalizePhone(trimmed);
   if (!phone) return { canonicalEmail: null, phone: null };
-  const people = await kvGet(env, orgKey(orgId, 'people'), []);
   const person = people.find(p => p.phone && normalizePhone(p.phone) === phone);
   return {
     canonicalEmail: person?.email?.toLowerCase() || null,
     phone,
+    personPhone: person?.phone || null,
     personName: person?.name || null,
   };
 }
@@ -704,7 +788,7 @@ export async function onRequest(context) {
     const raw = (body.identifier || body.email || '').trim();
     const { password = '', name = '' } = body;
     if (!raw || !password) return json({ error: 'identifier and password required' }, 400);
-    const { canonicalEmail, personName } = await resolveIdentifier(env, orgId, raw);
+    const { canonicalEmail, personName, personPhone } = await resolveIdentifier(env, orgId, raw);
     if (!canonicalEmail) return json({ error: 'Phone number not found in this organization. Try registering with your email instead.' }, 404);
     // Must have a role in this org
     const roles = await kvGet(env, orgKey(orgId, 'roles'), {});
@@ -716,7 +800,7 @@ export async function onRequest(context) {
     const resolvedName = name || personName || canonicalEmail;
     users[canonicalEmail] = { name: resolvedName, passwordHash: await sha256(password), role, createdAt: new Date().toISOString() };
     await kvPut(env, orgKey(orgId, 'users'), users);
-    return json({ ok: true, role, name: resolvedName, orgName: org.name });
+    return json({ ok: true, role, name: resolvedName, email: canonicalEmail, phone: personPhone || null, orgName: org.name });
   }
 
   // ── POST /sync/auth/login — verify credentials, return role ──────────────
@@ -726,7 +810,7 @@ export async function onRequest(context) {
     const raw = (body.identifier || body.email || '').trim();
     const { password = '' } = body;
     if (!raw || !password) return json({ error: 'identifier and password required' }, 400);
-    const { canonicalEmail } = await resolveIdentifier(env, orgId, raw);
+    const { canonicalEmail, personName, personPhone } = await resolveIdentifier(env, orgId, raw);
     if (!canonicalEmail) return json({ error: 'Phone number not found in this organization.' }, 404);
     const users = await kvGet(env, orgKey(orgId, 'users'), {});
     const user = users[canonicalEmail];
@@ -736,7 +820,100 @@ export async function onRequest(context) {
     // Also check current role (may have been updated since registration)
     const roles = await kvGet(env, orgKey(orgId, 'roles'), {});
     const role = roles[canonicalEmail] || user.role;
-    return json({ ok: true, role, name: user.name, orgName: org.name, branchCity: org.city || '' });
+    return json({
+      ok: true,
+      role,
+      name: user.name || personName || canonicalEmail,
+      email: canonicalEmail,
+      phone: personPhone || null,
+      orgName: org.name,
+      branchCity: org.city || '',
+    });
+  }
+
+  // ── POST /sync/auth/forgot-password — send reset code to account email ──
+  if (route === 'auth/forgot-password' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const raw = (body.identifier || body.email || body.phone || '').trim();
+    if (!raw) return json({ error: 'identifier required' }, 400);
+    if (!env.RESEND_API_KEY || !env.FROM_EMAIL) {
+      return json({ error: 'Password reset email is not configured for this workspace.' }, 503);
+    }
+
+    const { canonicalEmail, personName } = await resolveIdentifier(env, orgId, raw);
+    if (!canonicalEmail) {
+      return json({ ok: true });
+    }
+
+    const users = await kvGet(env, orgKey(orgId, 'users'), {});
+    const user = users[canonicalEmail];
+    if (!user) {
+      return json({ ok: true });
+    }
+
+    const code = makeNumericCode();
+    await kvPut(env, passwordResetKey(orgId, canonicalEmail), {
+      codeHash: await sha256(code),
+      expiresAt: Date.now() + RESET_CODE_TTL_MS,
+      createdAt: new Date().toISOString(),
+    });
+
+    try {
+      await sendPasswordResetEmail(env, {
+        to: canonicalEmail,
+        name: user.name || personName || canonicalEmail,
+        code,
+        orgName: org.name,
+      });
+    } catch (error) {
+      await kvDelete(env, passwordResetKey(orgId, canonicalEmail));
+      return json({ error: error.message || 'Failed to send password reset email' }, 502);
+    }
+
+    return json({ ok: true });
+  }
+
+  // ── POST /sync/auth/reset-password — verify reset code and set password ─
+  if (route === 'auth/reset-password' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const raw = (body.identifier || body.email || body.phone || '').trim();
+    const code = String(body.code || '').trim();
+    const newPassword = String(body.newPassword || '');
+    if (!raw || !code || !newPassword) {
+      return json({ error: 'identifier, code, and newPassword required' }, 400);
+    }
+    if (newPassword.length < 6) {
+      return json({ error: 'New password must be at least 6 characters' }, 400);
+    }
+
+    const { canonicalEmail } = await resolveIdentifier(env, orgId, raw);
+    if (!canonicalEmail) {
+      return json({ error: 'Invalid or expired reset code' }, 400);
+    }
+
+    const users = await kvGet(env, orgKey(orgId, 'users'), {});
+    const user = users[canonicalEmail];
+    if (!user) {
+      return json({ error: 'Invalid or expired reset code' }, 400);
+    }
+
+    const resetRecord = await kvGet(env, passwordResetKey(orgId, canonicalEmail), null);
+    if (!resetRecord || !resetRecord.codeHash || Date.now() > Number(resetRecord.expiresAt || 0)) {
+      await kvDelete(env, passwordResetKey(orgId, canonicalEmail));
+      return json({ error: 'Invalid or expired reset code' }, 400);
+    }
+
+    const submittedCodeHash = await sha256(code);
+    if (submittedCodeHash !== resetRecord.codeHash) {
+      return json({ error: 'Invalid or expired reset code' }, 400);
+    }
+
+    user.passwordHash = await sha256(newPassword);
+    user.updatedAt = new Date().toISOString();
+    await kvPut(env, orgKey(orgId, 'users'), users);
+    await kvDelete(env, passwordResetKey(orgId, canonicalEmail));
+
+    return json({ ok: true, email: canonicalEmail });
   }
 
   // ── GET /sync/people — return the org's people list ─────────────────────
