@@ -1,12 +1,27 @@
-name = "ultimatelab"
+name = "ultimatelabs"
 compatibility_date = "2024-01-01"
+pages_build_output_dir = "dist"
 
-[build]
-command = "npm install && npm run build"
+# ── Cloudflare KV — persistent sync storage ─────────────────────────────────
+# Setup steps (run once in this folder):
+#   1. wrangler login
+#   2. wrangler kv:namespace create STORE
+#      → copy the returned `id` below
+#   3. wrangler kv:namespace create STORE --preview
+#      → copy the returned `id` as `preview_id` below
+#   4. git push  (Cloudflare Pages auto-deploys)
+[[kv_namespaces]]
+binding = "STORE"
+id = "abcb5dd163db4387bb6d4c704755492c"
+preview_id = "0739ae84eb0241ff9cf652b9deb9fd40"
 
-[build.upload]
-dir = "dist"
+# ── Queue producer: dispatches stem jobs to CineStage Container ──────────────
+[[queues.producers]]
+binding = "STEM_QUEUE"
+queue = "stem-jobs"
 
-[[routes]]
-pattern = "ultimatelab.co"
-custom_domain = true
+# ── R2 bucket: source audio uploads + processed stems ───────────────────────
+[[r2_buckets]]
+binding = "STEMS_R2"
+bucket_name = "cinestage-stems"
+preview_bucket_name = "cinestage-stems"
