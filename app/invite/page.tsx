@@ -19,6 +19,7 @@ interface InviteData {
   name: string
   email: string
   phone: string
+  invitedByName?: string
   contactHint?: string
   status: 'pending' | 'accepted' | 'registered' | string
   createdAt?: string | null
@@ -161,14 +162,19 @@ export default function InvitePage() {
               <p className="text-sm font-semibold uppercase tracking-[0.22em] text-emerald-300/80">
                 {data.orgName}
               </p>
+              {data.invitedByName ? (
+                <p className="mt-3 text-sm font-semibold text-slate-400">
+                  Invited by {data.invitedByName}
+                </p>
+              ) : null}
               <h1 className="mt-3 text-4xl font-black leading-tight md:text-5xl">
                 {isAccepted ? 'You are in.' : 'You have been invited to join the team.'}
               </h1>
               <p className="mt-5 max-w-2xl text-base leading-8 text-slate-300 md:text-lg">
                 {data.name ? `Hi ${data.name}, ` : ''}
                 {isAccepted
-                  ? 'your invitation is active. Download or open Ultimate Playback, register with your invited contact info, and complete the 6-digit email confirmation step.'
-                  : 'accept this invitation to connect with your church or organization on Ultimate Playback. Once accepted, you will get the app links and the registration handoff immediately.'}
+                  ? 'your invitation is active. Download or open Ultimate Playback, register with your invited contact info, and complete the 6-digit email confirmation step so your member profile appears in Ultimate Playback and Ultimate Musician automatically.'
+                  : 'accept this invitation to connect with your church or organization on Ultimate Playback. Once accepted, the iPhone, Android, and desktop options unlock immediately.'}
               </p>
             </div>
 
@@ -253,7 +259,7 @@ export default function InvitePage() {
                   <div>
                     <h2 className="text-2xl font-black">Download or open the app</h2>
                     <p className="text-sm leading-7 text-slate-400">
-                      Once you finish registration, your team will automatically be notified that you are ready to be assigned.
+                      Once you finish registration, you will appear as a member in Ultimate Playback and Ultimate Musician automatically.
                     </p>
                   </div>
                 </div>
@@ -344,8 +350,8 @@ export default function InvitePage() {
                 },
                 {
                   step: '5',
-                  title: 'Your team gets notified',
-                  body: 'As soon as registration finishes, the admin dashboard is notified that you are ready for assignments.',
+                  title: 'You appear in both apps',
+                  body: 'As soon as registration finishes, your member profile shows up in Ultimate Playback and Ultimate Musician so the team can assign you.',
                 },
               ].map((item) => (
                 <div
@@ -371,7 +377,7 @@ export default function InvitePage() {
               </p>
               <p className="mt-3 text-sm leading-7 text-emerald-100/85">
                 {isAccepted
-                  ? 'Your invitation is active. Finish account registration in Ultimate Playback and your team will see that you are ready to assign.'
+                  ? 'Your invitation is active. Finish account registration in Ultimate Playback and your profile will sync back to both apps automatically.'
                   : 'Accept the invitation first. The app links and registration handoff unlock immediately after that step.'}
               </p>
             </div>
