@@ -1445,15 +1445,23 @@ function publicInvitePayload(invite) {
   };
 }
 
+function buildOrgTeamLabel(orgName = '') {
+  const normalized = String(orgName || '').trim() || 'your organization';
+  return /(worship|team|ministry)/i.test(normalized)
+    ? normalized
+    : `${normalized} Worship Team`;
+}
+
 function buildInviteShareText(invite) {
   const normalized = normalizeInviteRecord(invite);
+  const teamLabel = buildOrgTeamLabel(normalized.orgName);
   const landingUrl = buildInviteLandingUrl(normalized.token);
   const contactBits = [];
   if (normalized.email) contactBits.push(normalized.email);
   if (normalized.phone) contactBits.push(normalized.phone);
 
   return [
-    `You've been invited to join ${normalized.orgName} on Ultimate Playback.`,
+    `You've been invited to join ${teamLabel} on Ultimate Playback.`,
     normalized.name ? `Invitation for: ${normalized.name}` : '',
     `Accept your invitation: ${landingUrl}`,
     contactBits.length > 0
@@ -1638,6 +1646,7 @@ function assignmentAlertEmailHtml(assignment) {
 function inviteEmailHtml(invite) {
   const normalized = normalizeInviteRecord(invite);
   const orgName = escapeHtml(normalized.orgName);
+  const teamLabel = escapeHtml(buildOrgTeamLabel(normalized.orgName));
   const recipientName = escapeHtml(normalized.name || 'there');
   const invitedByName = escapeHtml(normalized.invitedByName || 'your team admin');
   const landingUrl = buildInviteLandingUrl(normalized.token);
@@ -1652,14 +1661,16 @@ function inviteEmailHtml(invite) {
       <div style="max-width:560px;margin:0 auto;background:linear-gradient(180deg,#0B1120 0%,#0F172A 100%);border:1px solid #1F2937;border-radius:28px;overflow:hidden;box-shadow:0 20px 60px rgba(2,6,23,0.45)">
         <div style="padding:32px 32px 18px;background:radial-gradient(circle at top left,rgba(99,102,241,0.22),transparent 55%),radial-gradient(circle at top right,rgba(16,185,129,0.12),transparent 40%)">
           <p style="margin:0 0 10px;color:#A5B4FC;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase">Ultimate Playback</p>
-          <h1 style="margin:0 0 12px;font-size:30px;line-height:1.1;color:#FFFFFF">You're invited to join ${orgName}</h1>
+          <h1 style="margin:0 0 12px;font-size:30px;line-height:1.1;color:#FFFFFF">You're invited to join ${teamLabel}</h1>
           <p style="margin:0;color:#CBD5E1;font-size:15px;line-height:1.7">
-            Hi ${recipientName}, ${invitedByName} invited you to join the team in Ultimate Playback so you can receive assignments, setlists, practice materials, and team updates.
+            Hi ${recipientName}, ${invitedByName} invited you to join ${teamLabel} in Ultimate Playback as a new team member so you can receive assignments, setlists, practice materials, and team updates.
           </p>
         </div>
 
         <div style="padding:0 32px 32px">
           <div style="margin:18px 0 24px;padding:18px 20px;border:1px solid #1E293B;border-radius:20px;background:#020617">
+            <p style="margin:0 0 6px;color:#94A3B8;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase">Organization</p>
+            <p style="margin:0 0 14px;color:#F8FAFC;font-size:18px;font-weight:700">${orgName}</p>
             <p style="margin:0 0 6px;color:#94A3B8;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase">Register With</p>
             <p style="margin:0;color:#F8FAFC;font-size:18px;font-weight:700">${contactHint}</p>
             <p style="margin:10px 0 0;color:#94A3B8;font-size:13px;line-height:1.6">
@@ -1703,6 +1714,7 @@ async function sendTeamInviteEmail(env, { to, invite }) {
   }
 
   const normalized = normalizeInviteRecord(invite);
+  const teamLabel = buildOrgTeamLabel(normalized.orgName);
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -1712,7 +1724,7 @@ async function sendTeamInviteEmail(env, { to, invite }) {
     body: JSON.stringify({
       from: `${fromName} <${fromEmail}>`,
       to: [to],
-      subject: `You're invited to join ${normalized.orgName} on Ultimate Playback`,
+      subject: `You're invited to join ${teamLabel}`,
       html: inviteEmailHtml(normalized),
       text: buildInviteShareText(normalized),
     }),
