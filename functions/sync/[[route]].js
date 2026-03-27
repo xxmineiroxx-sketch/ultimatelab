@@ -3025,7 +3025,15 @@ export async function onRequest(context) {
       isSystemMsg: true,
       visibility: 'admin_only',
       messageType: 'assignment_response',
-      metadata: { serviceId, status, role, personEmail: personId },
+      metadata: {
+        serviceId,
+        serviceName,
+        status,
+        role,
+        personEmail: personId,
+        declineReason,
+        respondedAt,
+      },
     });
     await kvPut(env, orgKey(orgId, 'messages'), msgs);
 
