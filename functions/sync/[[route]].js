@@ -368,6 +368,240 @@ async function sendBirthdayGreetingEmail(env, { to, name, orgName }) {
   return true;
 }
 
+const EXPO_PUSH_API_URL = 'https://exp.host/--/api/v2/push/send';
+const PUSH_ADMIN_ROLES = new Set([
+  'admin',
+  'md',
+  'music_director',
+  'worship_leader',
+  'leader',
+]);
+
+function normalizePushPreferences(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    assignments: source.assignments !== false,
+    messages: source.messages !== false,
+    reminders: source.reminders !== false,
+  };
+}
+
+function normalizePushDeviceRecord(record = {}) {
+  const token = String(record.token || '').trim();
+  if (!token) return null;
+
+  const now = new Date().toISOString();
+  return {
+    token,
+    email: normalizeLower(record.email || ''),
+    name: clipText(record.name || '', 120),
+    platform: normalizeLower(record.platform || ''),
+    deviceId: sanitizeDeviceId(record.deviceId || ''),
+    app: normalizeRoleKey(record.app || 'ultimate_playback') || 'ultimate_playback',
+    grantedRole: normalizeRoleKey(record.grantedRole || record.role || ''),
+    preferences: normalizePushPreferences(
+      record.preferences || record.notificationPreferences || {},
+    ),
+    createdAt: record.createdAt || now,
+    updatedAt: now,
+  };
+}
+
+async function getPushDevices(env, orgId) {
+  return kvGet(env, orgKey(orgId, 'pushDevices'), []);
+}
+
+async function savePushDevices(env, orgId, devices = []) {
+  const nextDevices = [];
+  const seenTokens = new Set();
+
+  for (const rawDevice of Array.isArray(devices) ? devices : []) {
+    const normalized = normalizePushDeviceRecord(rawDevice);
+    if (!normalized) continue;
+    if (seenTokens.has(normalized.token)) continue;
+    seenTokens.add(normalized.token);
+    nextDevices.push(normalized);
+  }
+
+  await kvPut(env, orgKey(orgId, 'pushDevices'), nextDevices);
+  return nextDevices;
+}
+
+async function registerPushDevice(env, orgId, record = {}) {
+  const normalized = normalizePushDeviceRecord(record);
+  if (!normalized) return null;
+
+  const currentDevices = await getPushDevices(env, orgId);
+  const nextDevices = [];
+  let didReplace = false;
+
+  for (const existing of Array.isArray(currentDevices) ? currentDevices : []) {
+    if (!existing?.token) continue;
+
+    const sameToken = existing.token === normalized.token;
+    const sameDevice =
+      normalized.deviceId
+      && sanitizeDeviceId(existing.deviceId || '') === normalized.deviceId
+      && normalizeRoleKey(existing.app || 'ultimate_playback') === normalized.app;
+
+    if (sameToken || sameDevice) {
+      if (!didReplace) {
+        nextDevices.push({
+          ...existing,
+          ...normalized,
+          createdAt: existing.createdAt || normalized.createdAt,
+        });
+        didReplace = true;
+      }
+      continue;
+    }
+
+    nextDevices.push(existing);
+  }
+
+  if (!didReplace) nextDevices.push(normalized);
+  await savePushDevices(env, orgId, nextDevices);
+  return normalized;
+}
+
+async function unregisterPushDevice(env, orgId, {
+  token = '',
+  email = '',
+  deviceId = '',
+  app = 'ultimate_playback',
+} = {}) {
+  const normalizedToken = String(token || '').trim();
+  const normalizedEmail = normalizeLower(email || '');
+  const normalizedDeviceId = sanitizeDeviceId(deviceId || '');
+  const normalizedApp = normalizeRoleKey(app || 'ultimate_playback') || 'ultimate_playback';
+
+  const currentDevices = await getPushDevices(env, orgId);
+  const nextDevices = (Array.isArray(currentDevices) ? currentDevices : []).filter((device) => {
+    if (!device?.token) return false;
+
+    const sameApp =
+      normalizeRoleKey(device.app || 'ultimate_playback') === normalizedApp;
+    if (!sameApp) return true;
+
+    if (normalizedToken && device.token === normalizedToken) return false;
+
+    if (
+      !normalizedToken
+      && normalizedEmail
+      && normalizedDeviceId
+      && normalizeLower(device.email || '') === normalizedEmail
+      && sanitizeDeviceId(device.deviceId || '') === normalizedDeviceId
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  await savePushDevices(env, orgId, nextDevices);
+  return nextDevices.length !== currentDevices.length;
+}
+
+function isPushAdminRole(role = '') {
+  return PUSH_ADMIN_ROLES.has(normalizeRoleKey(role));
+}
+
+function filterPushDevices(devices, {
+  emails = null,
+  adminOnly = false,
+  preferenceKey = '',
+  excludeEmails = [],
+} = {}) {
+  const emailSet = emails
+    ? new Set((Array.isArray(emails) ? emails : [emails]).map(normalizeLower).filter(Boolean))
+    : null;
+  const excludedEmails = new Set(
+    (Array.isArray(excludeEmails) ? excludeEmails : [excludeEmails])
+      .map(normalizeLower)
+      .filter(Boolean),
+  );
+  const seenTokens = new Set();
+  const filtered = [];
+
+  for (const device of Array.isArray(devices) ? devices : []) {
+    const token = String(device?.token || '').trim();
+    if (!token || seenTokens.has(token)) continue;
+
+    const deviceEmail = normalizeLower(device?.email || '');
+    if (deviceEmail && excludedEmails.has(deviceEmail)) continue;
+    if (emailSet && (!deviceEmail || !emailSet.has(deviceEmail))) continue;
+    if (adminOnly && !isPushAdminRole(device?.grantedRole || '')) continue;
+    if (preferenceKey && device?.preferences?.[preferenceKey] === false) continue;
+
+    seenTokens.add(token);
+    filtered.push(device);
+  }
+
+  return filtered;
+}
+
+async function sendExpoPushMessages(messages = []) {
+  const stableMessages = (Array.isArray(messages) ? messages : []).filter((message) =>
+    String(message?.to || '').trim()
+  );
+  if (stableMessages.length === 0) return [];
+
+  const results = [];
+  for (let index = 0; index < stableMessages.length; index += 100) {
+    const chunk = stableMessages.slice(index, index + 100);
+    const response = await fetch(EXPO_PUSH_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'Accept-encoding': 'gzip, deflate',
+      },
+      body: JSON.stringify(chunk),
+    });
+
+    const raw = await response.text();
+    if (!response.ok) {
+      console.log('[sync/push] expo push failed', raw);
+      results.push({ ok: false, status: response.status, body: raw });
+      continue;
+    }
+
+    try {
+      results.push(JSON.parse(raw));
+    } catch {
+      results.push({ ok: true, body: raw });
+    }
+  }
+
+  return results;
+}
+
+async function sendPushToDevices(devices, {
+  title = '',
+  body = '',
+  data = {},
+  sound = 'default',
+} = {}, preferenceKey = 'messages') {
+  const targetDevices = filterPushDevices(devices, { preferenceKey });
+  if (targetDevices.length === 0) return { ok: true, count: 0 };
+
+  const payloads = targetDevices.map((device) => ({
+    to: device.token,
+    sound,
+    title: clipText(title, 80),
+    body: clipText(body, 200),
+    data: {
+      ...data,
+      targetEmail: device.email || '',
+    },
+    priority: 'high',
+    channelId: 'default',
+  }));
+
+  await sendExpoPushMessages(payloads);
+  return { ok: true, count: payloads.length };
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -765,6 +999,75 @@ function mergePlanTeamEntries(existingTeam = [], incomingTeam = []) {
   });
 }
 
+function getTeamMemberEmail(member = {}, peopleById = {}) {
+  const directEmail = normalizeLower(member?.email || '');
+  if (directEmail) return directEmail;
+
+  const personId = String(member?.personId || '').trim();
+  if (!personId) return '';
+
+  const linkedPerson = peopleById[personId] || peopleById[normalizeLower(personId)] || null;
+  return normalizeLower(linkedPerson?.email || '');
+}
+
+function getTeamMemberName(member = {}, peopleById = {}) {
+  const directName = String(member?.name || '').trim();
+  if (directName) return directName;
+
+  const personId = String(member?.personId || '').trim();
+  if (!personId) return '';
+
+  const linkedPerson = peopleById[personId] || peopleById[normalizeLower(personId)] || null;
+  return String(linkedPerson?.name || '').trim();
+}
+
+function buildTeamEntryLookup(team = []) {
+  const lookup = new Map();
+  for (const member of Array.isArray(team) ? team : []) {
+    for (const key of getPlanTeamEntryIdentityKeys(member)) {
+      if (!lookup.has(key)) lookup.set(key, member);
+    }
+  }
+  return lookup;
+}
+
+function collectNewPendingAssignments(previousTeam = [], nextTeam = [], peopleById = {}) {
+  const previousLookup = buildTeamEntryLookup(previousTeam);
+  const seen = new Set();
+  const results = [];
+
+  for (const member of Array.isArray(nextTeam) ? nextTeam : []) {
+    let previousMember = null;
+    for (const key of getPlanTeamEntryIdentityKeys(member)) {
+      if (previousLookup.has(key)) {
+        previousMember = previousLookup.get(key);
+        break;
+      }
+    }
+
+    const nextStatus = normalizeAssignmentStatus(member?.status) || 'pending';
+    const previousStatus = normalizeAssignmentStatus(previousMember?.status) || '';
+
+    if (nextStatus !== 'pending' || previousStatus === 'pending') continue;
+
+    const email = getTeamMemberEmail(member, peopleById);
+    if (!email) continue;
+
+    const identityKey = `${email}|${normalizeRoleKey(member?.role || '')}`;
+    if (seen.has(identityKey)) continue;
+    seen.add(identityKey);
+
+    results.push({
+      email,
+      personId: String(member?.personId || '').trim(),
+      name: getTeamMemberName(member, peopleById),
+      role: String(member?.role || '').trim(),
+    });
+  }
+
+  return results;
+}
+
 function mergeStoredPlans(existingPlans = {}, incomingPlans = {}) {
   const mergedPlans = { ...existingPlans };
 
@@ -1146,6 +1449,149 @@ function buildInviteShareText(invite) {
   ].filter(Boolean).join('\n\n');
 }
 
+function formatDisplayServiceDate(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const datePart = raw.includes('T') ? raw.split('T')[0] : raw;
+  const match = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return raw;
+
+  const [, year, month, day] = match;
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const monthLabel = monthNames[Math.max(0, Number(month) - 1)] || month;
+  return `${monthLabel} ${Number(day)}, ${year}`;
+}
+
+function formatDisplayServiceTime(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const match = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return raw;
+
+  let hour = Number(match[1]);
+  const minute = match[2];
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  hour = hour % 12 || 12;
+  return `${hour}:${minute} ${suffix}`;
+}
+
+function buildServiceScheduleLabel(dateValue, timeValue) {
+  const dateLabel = formatDisplayServiceDate(dateValue);
+  const timeLabel = formatDisplayServiceTime(timeValue);
+  if (dateLabel && timeLabel) return `${dateLabel} at ${timeLabel}`;
+  return dateLabel || timeLabel || 'Date and time to be confirmed';
+}
+
+function normalizeAssignmentEmailPayload(assignment = {}) {
+  const roles = Array.isArray(assignment.roles)
+    ? assignment.roles.map((role) => String(role || '').trim()).filter(Boolean)
+    : String(assignment.role || '').trim()
+      ? [String(assignment.role || '').trim()]
+      : [];
+
+  return {
+    orgName: String(assignment.orgName || 'Worship Team').trim() || 'Worship Team',
+    branchCity: String(assignment.branchCity || '').trim(),
+    recipientName: String(assignment.recipientName || assignment.name || '').trim(),
+    serviceId: String(assignment.serviceId || '').trim(),
+    serviceName: String(assignment.serviceName || assignment.serviceId || 'Service').trim() || 'Service',
+    serviceDate: String(assignment.serviceDate || '').trim(),
+    serviceTime: String(assignment.serviceTime || '').trim(),
+    roles,
+  };
+}
+
+function buildAssignmentAlertText(assignment) {
+  const normalized = normalizeAssignmentEmailPayload(assignment);
+  const schedule = buildServiceScheduleLabel(
+    normalized.serviceDate,
+    normalized.serviceTime,
+  );
+  const roleLabel = normalized.roles.length === 1 ? 'Role' : 'Roles';
+
+  return [
+    `You've been assigned to ${normalized.serviceName} in ${normalized.orgName}.`,
+    `When: ${schedule}`,
+    normalized.roles.length > 0 ? `${roleLabel}: ${normalized.roles.join(', ')}` : '',
+    normalized.branchCity ? `Location: ${normalized.branchCity}` : '',
+    'Open Ultimate Playback to review and respond to this assignment.',
+    normalized.serviceId ? `Service ID: ${normalized.serviceId}` : '',
+  ].filter(Boolean).join('\n\n');
+}
+
+function assignmentAlertEmailHtml(assignment) {
+  const normalized = normalizeAssignmentEmailPayload(assignment);
+  const links = {
+    openApp: normalized.serviceId
+      ? `ultimateplayback://assignments?serviceId=${encodeURIComponent(normalized.serviceId)}`
+      : 'ultimateplayback://assignments',
+    ios: PLAYBACK_IOS_URL,
+    android: PLAYBACK_ANDROID_URL,
+    desktop: PLAYBACK_DESKTOP_URL,
+  };
+  const orgName = escapeHtml(normalized.orgName);
+  const recipientName = escapeHtml(normalized.recipientName || 'there');
+  const serviceName = escapeHtml(normalized.serviceName);
+  const schedule = escapeHtml(
+    buildServiceScheduleLabel(normalized.serviceDate, normalized.serviceTime),
+  );
+  const roleLabel = normalized.roles.length === 1 ? 'Role' : 'Roles';
+  const roles = normalized.roles.length > 0
+    ? escapeHtml(normalized.roles.join(', '))
+    : 'To be confirmed';
+  const branchCity = escapeHtml(normalized.branchCity);
+  const serviceId = escapeHtml(normalized.serviceId);
+
+  return `
+    <div style="background:#020617;padding:32px 20px;font-family:Arial,sans-serif;color:#F8FAFC">
+      <div style="max-width:560px;margin:0 auto;background:linear-gradient(180deg,#0B1120 0%,#0F172A 100%);border:1px solid #1F2937;border-radius:28px;overflow:hidden;box-shadow:0 20px 60px rgba(2,6,23,0.45)">
+        <div style="padding:32px 32px 18px;background:radial-gradient(circle at top left,rgba(99,102,241,0.22),transparent 55%),radial-gradient(circle at top right,rgba(16,185,129,0.12),transparent 40%)">
+          <p style="margin:0 0 10px;color:#A5B4FC;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase">Ultimate Playback</p>
+          <h1 style="margin:0 0 12px;font-size:30px;line-height:1.1;color:#FFFFFF">New assignment from ${orgName}</h1>
+          <p style="margin:0;color:#CBD5E1;font-size:15px;line-height:1.7">
+            Hi ${recipientName}, you were assigned to <strong style="color:#FFFFFF">${serviceName}</strong> in Ultimate Playback.
+          </p>
+        </div>
+
+        <div style="padding:0 32px 32px">
+          <div style="margin:18px 0 24px;padding:18px 20px;border:1px solid #1E293B;border-radius:20px;background:#020617">
+            <p style="margin:0 0 6px;color:#94A3B8;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase">Assignment Details</p>
+            <p style="margin:0 0 10px;color:#F8FAFC;font-size:20px;font-weight:700">${serviceName}</p>
+            <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Organization:</strong> ${orgName}</p>
+            <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">When:</strong> ${schedule}</p>
+            <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">${roleLabel}:</strong> ${roles}</p>
+            ${branchCity ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Location:</strong> ${branchCity}</p>` : ''}
+            ${serviceId ? `<p style="margin:10px 0 0;color:#64748B;font-size:12px;line-height:1.6">Service ID: ${serviceId}</p>` : ''}
+          </div>
+
+          <div style="text-align:center;margin-bottom:18px">
+            <a href="${links.openApp}" style="display:inline-block;background:linear-gradient(135deg,#6366F1 0%,#8B5CF6 100%);color:#FFFFFF;text-decoration:none;font-weight:800;font-size:16px;padding:15px 28px;border-radius:16px;box-shadow:0 10px 30px rgba(99,102,241,0.35)">
+              Open Ultimate Playback
+            </a>
+          </div>
+
+          <div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)">
+            <p style="margin:0 0 10px;color:#E2E8F0;font-size:14px;font-weight:700">Need the app?</p>
+            <p style="margin:0 0 12px;color:#94A3B8;font-size:13px;line-height:1.8">
+              Review the assignment and respond in Ultimate Playback. If you have not finished registration yet, complete it with your invited email address.
+            </p>
+            <p style="margin:0;color:#CBD5E1;font-size:13px;line-height:1.8">
+              <a href="${links.ios}" style="color:#A5B4FC;text-decoration:none">iPhone</a>
+              &nbsp;•&nbsp;
+              <a href="${links.android}" style="color:#A5B4FC;text-decoration:none">Android</a>
+              &nbsp;•&nbsp;
+              <a href="${links.desktop}" style="color:#A5B4FC;text-decoration:none">Desktop</a>
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function inviteEmailHtml(invite) {
   const normalized = normalizeInviteRecord(invite);
   const orgName = escapeHtml(normalized.orgName);
@@ -1233,6 +1679,55 @@ async function sendTeamInviteEmail(env, { to, invite }) {
     const detail = await response.text();
     console.log('[sync/invite/create] resend failed', detail);
     throw new Error('Failed to send invitation email');
+  }
+}
+
+async function sendAssignmentAlertEmail(env, { to, assignment }) {
+  const resendApiKey = env.RESEND_API_KEY || '';
+  const fromEmail =
+    env.ASSIGNMENT_FROM_EMAIL
+    || env.INVITE_FROM_EMAIL
+    || env.ULTIMATE_MUSICIAN_FROM_EMAIL
+    || 'ultimatemusician@ultimatelabs.co';
+  const fromName =
+    env.ASSIGNMENT_FROM_NAME
+    || env.INVITE_FROM_NAME
+    || env.ULTIMATE_MUSICIAN_FROM_NAME
+    || 'Ultimate Musician';
+
+  if (!resendApiKey || !fromEmail) {
+    throw new Error('Assignment email is not configured');
+  }
+
+  const normalized = normalizeAssignmentEmailPayload(assignment);
+  const schedule = buildServiceScheduleLabel(
+    normalized.serviceDate,
+    normalized.serviceTime,
+  );
+  const subjectParts = [
+    normalized.orgName,
+    `assignment for ${normalized.serviceName}`,
+    schedule && schedule !== 'Date and time to be confirmed' ? schedule : '',
+  ].filter(Boolean);
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${resendApiKey}`,
+    },
+    body: JSON.stringify({
+      from: `${fromName} <${fromEmail}>`,
+      to: [to],
+      subject: subjectParts.join(' • '),
+      html: assignmentAlertEmailHtml(normalized),
+      text: buildAssignmentAlertText(normalized),
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    console.log('[sync/publish] resend failed', detail);
+    throw new Error('Failed to send assignment email');
   }
 }
 
@@ -2007,14 +2502,18 @@ export async function onRequest(context) {
     const { serviceId, plan, vocalAssignments } = body;
     if (!serviceId) return json({ error: 'serviceId required' }, 400);
 
-    const services = await kvGet(env, orgKey(orgId, 'services'), []);
+    const [services, plans, people, pushDevices] = await Promise.all([
+      kvGet(env, orgKey(orgId, 'services'), []),
+      kvGet(env, orgKey(orgId, 'plans'), {}),
+      kvGet(env, orgKey(orgId, 'people'), []),
+      getPushDevices(env, orgId),
+    ]);
     const svcIdx = services.findIndex(s => s.id === serviceId);
     const updated = svcIdx >= 0 ? { ...services[svcIdx] } : { id: serviceId };
     const existingServicePlan = updated.plan && typeof updated.plan === 'object'
       ? updated.plan
       : {};
-
-    const plans = await kvGet(env, orgKey(orgId, 'plans'), {});
+    const previousTeam = plans[serviceId]?.team || existingServicePlan.team || [];
     const mergedPlan = {
       ...(plans[serviceId] || {}),
       ...(plan || {}),
@@ -2026,6 +2525,12 @@ export async function onRequest(context) {
         : (plans[serviceId]?.team || existingServicePlan.team || []),
       serviceId,
     };
+    const { byId: peopleById } = buildPeopleIndexes(people);
+    const newPendingAssignments = collectNewPendingAssignments(
+      previousTeam,
+      mergedPlan.team || [],
+      peopleById,
+    );
 
     updated.plan = {
       ...existingServicePlan,
@@ -2046,7 +2551,92 @@ export async function onRequest(context) {
       writes.push(kvPut(env, orgKey(orgId, 'vocalAssignments'), vocals));
     }
     await Promise.all(writes);
-    return json({ ok: true, serviceId });
+
+    let pushCount = 0;
+    let emailAttempted = 0;
+    let emailSent = 0;
+    let emailFailed = 0;
+
+    if (newPendingAssignments.length > 0) {
+      const targetEmails = [...new Set(newPendingAssignments.map((entry) => entry.email).filter(Boolean))];
+      const targets = filterPushDevices(pushDevices, {
+        emails: targetEmails,
+        preferenceKey: 'assignments',
+      });
+      if (targets.length > 0) {
+        const pushResult = await sendPushToDevices(targets, {
+          title: 'New assignment',
+          body: `${updated.name || updated.title || serviceId} is ready for your response.`,
+          data: {
+            type: 'assignment',
+            screen: 'AssignmentsTab',
+            serviceId,
+            serviceName: updated.name || updated.title || serviceId,
+          },
+        }, 'assignments').catch((error) => {
+          console.log('[sync/push] assignment notify failed', error?.message || String(error));
+          return { ok: false, count: 0 };
+        });
+        pushCount = Number(pushResult?.count || 0);
+      }
+
+      const emailRecipients = Array.from(
+        newPendingAssignments.reduce((map, entry) => {
+          const email = normalizeLower(entry?.email || '');
+          if (!email) return map;
+
+          const current = map.get(email) || {
+            to: email,
+            recipientName: String(entry?.name || '').trim(),
+            roles: [],
+          };
+
+          if (!current.recipientName && entry?.name) {
+            current.recipientName = String(entry.name || '').trim();
+          }
+          if (entry?.role && !current.roles.includes(entry.role)) {
+            current.roles.push(entry.role);
+          }
+
+          map.set(email, current);
+          return map;
+        }, new Map()).values(),
+      );
+
+      for (const recipient of emailRecipients) {
+        emailAttempted += 1;
+        try {
+          await sendAssignmentAlertEmail(env, {
+            to: recipient.to,
+            assignment: {
+              orgName: org.name,
+              branchCity: org.city || '',
+              recipientName: recipient.recipientName,
+              serviceId,
+              serviceName: updated.name || updated.title || serviceId,
+              serviceDate: updated.date || updated.serviceDate || '',
+              serviceTime: updated.time || updated.startTime || '',
+              roles: recipient.roles,
+            },
+          });
+          emailSent += 1;
+        } catch (error) {
+          emailFailed += 1;
+          console.log('[sync/publish] assignment email failed', recipient.to, error?.message || String(error));
+        }
+      }
+    }
+
+    return json({
+      ok: true,
+      serviceId,
+      alerts: {
+        pushSent: pushCount,
+        emailAttempted,
+        emailSent,
+        emailFailed,
+      },
+    });
   }
 
   // ── POST /sync/service/delete ────────────────────────────────────────────
@@ -2084,6 +2674,27 @@ export async function onRequest(context) {
     ]);
 
     return json({ ok: true, serviceId, removed: nextServices.length !== services.length });
+  }
+
+  // ── POST /sync/push/register ─────────────────────────────────────────────
+  if (route === 'push/register' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const token = String(body.token || '').trim();
+    const email = normalizeLower(body.email || '');
+
+    if (!token || !email) {
+      return json({ error: 'token and email are required' }, 400);
+    }
+
+    const saved = await registerPushDevice(env, orgId, body);
+    return json({ ok: true, token: saved?.token || token });
+  }
+
+  // ── POST /sync/push/unregister ───────────────────────────────────────────
+  if (route === 'push/unregister' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const removed = await unregisterPushDevice(env, orgId, body || {});
+    return json({ ok: true, removed });
   }
 
   // ── GET /sync/assignments ────────────────────────────────────────────────
@@ -3256,6 +3867,7 @@ export async function onRequest(context) {
     const body = await request.json().catch(() => ({}));
     const { fromEmail = '', fromName = '', subject = '', message: msgText = '', to = 'admin' } = body;
     const msgs = await kvGet(env, orgKey(orgId, 'messages'), []);
+    const normalizedTo = normalizeLower(to || 'admin') || 'admin';
     msgs.push({
       id: makeId(),
       fromEmail,
@@ -3271,6 +3883,45 @@ export async function onRequest(context) {
       messageType: 'conversation',
     });
     await kvPut(env, orgKey(orgId, 'messages'), msgs);
+
+    try {
+      const pushDevices = await getPushDevices(env, orgId);
+      let targets = [];
+      if (normalizedTo === 'all_team') {
+        targets = filterPushDevices(pushDevices, {
+          preferenceKey: 'messages',
+          excludeEmails: [fromEmail],
+        });
+      } else if (normalizedTo === 'admin') {
+        targets = filterPushDevices(pushDevices, {
+          adminOnly: true,
+          preferenceKey: 'messages',
+          excludeEmails: [fromEmail],
+        });
+      } else {
+        targets = filterPushDevices(pushDevices, {
+          emails: [normalizedTo],
+          preferenceKey: 'messages',
+          excludeEmails: [fromEmail],
+        });
+      }
+
+      await sendPushToDevices(targets, {
+        title: normalizedTo === 'all_team'
+          ? `Team message from ${fromName || 'Team'}`
+          : `New message from ${fromName || 'Team'}`,
+        body: subject || msgText || 'Open Ultimate Playback to read your message.',
+        data: {
+          type: 'message',
+          screen: 'MessagesTab',
+          to: normalizedTo,
+          subject: clipText(subject, 80),
+        },
+      }, 'messages');
+    } catch (error) {
+      console.log('[sync/push] message notify failed', error?.message || String(error));
+    }
+
     return json({ ok: true });
   }
 
@@ -3335,6 +3986,29 @@ export async function onRequest(context) {
     msg.replies = msg.replies || [];
     msg.replies.push({ id: makeId(), from, message: replyText, timestamp: new Date().toISOString() });
     await kvPut(env, orgKey(orgId, 'messages'), msgs);
+
+    try {
+      const targetEmail = normalizeLower(msg.fromEmail || '');
+      if (targetEmail) {
+        const pushDevices = await getPushDevices(env, orgId);
+        const targets = filterPushDevices(pushDevices, {
+          emails: [targetEmail],
+          preferenceKey: 'messages',
+        });
+        await sendPushToDevices(targets, {
+          title: 'Reply from Admin',
+          body: replyText || 'Open Ultimate Playback to read the reply.',
+          data: {
+            type: 'message',
+            screen: 'MessagesTab',
+            subject: clipText(msg.subject || '', 80),
+          },
+        }, 'messages');
+      }
+    } catch (error) {
+      console.log('[sync/push] reply notify failed', error?.message || String(error));
+    }
+
     return json({ ok: true });
   }
 
