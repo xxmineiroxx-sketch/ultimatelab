@@ -184,6 +184,192 @@ function orgKey(orgId, type) {
   return `org:${orgId}:${type}`;
 }
 
+function globalMemberBlockoutsKey(email) {
+  return `memberBlockouts:${normalizeLower(email)}`;
+}
+
+function acceptedAssignmentsIndexKey(email) {
+  return `acceptedAssignments:${normalizeLower(email)}`;
+}
+
+function normalizeDateKey(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return '';
+  return [
+    parsed.getFullYear(),
+    String(parsed.getMonth() + 1).padStart(2, '0'),
+    String(parsed.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+function normalizeTimeKey(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const match = raw.match(/(\d{1,2}):(\d{2})/);
+  if (!match) return '';
+  return `${String(Number(match[1]) || 0).padStart(2, '0')}:${match[2]}`;
+}
+
+function buildServiceTimeSlot(serviceDate, serviceTime) {
+  const dateKey = normalizeDateKey(serviceDate);
+  const timeKey = normalizeTimeKey(serviceTime);
+  if (!dateKey || !timeKey) return '';
+  return `${dateKey} ${timeKey}`;
+}
+
+function normalizeBlockoutEntry(value = {}, fallback = {}) {
+  const email = normalizeLower(value.email || fallback.email || '');
+  const date = normalizeDateKey(value.date || fallback.date || '');
+  if (!email || !date) return null;
+
+  const createdAt =
+    value.created_at
+    || value.createdAt
+    || fallback.created_at
+    || fallback.createdAt
+    || new Date().toISOString();
+
+  return {
+    id: String(value.id || fallback.id || `blk_${Date.now()}_${makeId(5)}`).trim(),
+    email,
+    date,
+    reason: clipText(value.reason || fallback.reason, 280),
+    name: clipText(value.name || fallback.name, 160),
+    phone: String(value.phone || fallback.phone || '').trim(),
+    personId: String(value.personId || fallback.personId || '').trim(),
+    created_at: createdAt,
+    updated_at:
+      value.updated_at
+      || value.updatedAt
+      || fallback.updated_at
+      || fallback.updatedAt
+      || createdAt,
+  };
+}
+
+function mergeBlockoutEntries(...lists) {
+  const merged = new Map();
+
+  for (const list of lists) {
+    for (const rawEntry of Array.isArray(list) ? list : []) {
+      const entry = normalizeBlockoutEntry(rawEntry);
+      if (!entry) continue;
+      const key = `${entry.email}:${entry.date}`;
+      const current = merged.get(key);
+      merged.set(key, {
+        ...(current || {}),
+        ...entry,
+        created_at: current?.created_at || entry.created_at,
+      });
+    }
+  }
+
+  return Array.from(merged.values()).sort((left, right) => {
+    return `${left.date}:${left.email}`.localeCompare(`${right.date}:${right.email}`);
+  });
+}
+
+function removeBlockoutEntries(list = [], { id = '', email = '', date = '' } = {}) {
+  const normalizedId = String(id || '').trim();
+  const normalizedEmail = normalizeLower(email);
+  const normalizedDate = normalizeDateKey(date);
+
+  return mergeBlockoutEntries(list).filter((entry) => {
+    if (normalizedId && entry.id === normalizedId) return false;
+    if (normalizedEmail && normalizedDate) {
+      return !(entry.email === normalizedEmail && entry.date === normalizedDate);
+    }
+    if (normalizedEmail && !normalizedDate && !normalizedId) {
+      return entry.email !== normalizedEmail;
+    }
+    return true;
+  });
+}
+
+function syncPeopleBlockoutDates(people = [], email, nextBlockouts = []) {
+  const normalizedEmail = normalizeLower(email);
+  if (!normalizedEmail) {
+    return { didUpdate: false, nextPeople: Array.isArray(people) ? people : [] };
+  }
+
+  const normalizedBlockouts = mergeBlockoutEntries(nextBlockouts)
+    .filter((entry) => entry.email === normalizedEmail)
+    .map((entry) => ({
+      id: entry.id,
+      date: entry.date,
+      reason: entry.reason || '',
+      name: entry.name || '',
+      email: entry.email,
+      created_at: entry.created_at || null,
+      updated_at: entry.updated_at || null,
+    }));
+
+  let didUpdate = false;
+  const nextPeople = (Array.isArray(people) ? people : []).map((person) => {
+    if (normalizeLower(person?.email || '') !== normalizedEmail) return person;
+    didUpdate = true;
+    return {
+      ...person,
+      blockout_dates: normalizedBlockouts,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+
+  return { didUpdate, nextPeople };
+}
+
+function normalizeAcceptedAssignmentEntry(value = {}) {
+  const email = normalizeLower(value.email || value.personEmail || '');
+  const orgId = String(value.orgId || '').trim();
+  const serviceId = String(value.serviceId || '').trim();
+  if (!email || !orgId || !serviceId) return null;
+
+  const serviceDate = normalizeDateKey(value.serviceDate || value.date || '');
+  const serviceTime = normalizeTimeKey(value.serviceTime || value.time || '');
+
+  return {
+    email,
+    orgId,
+    orgName: String(value.orgName || '').trim(),
+    serviceId,
+    serviceName: String(value.serviceName || '').trim(),
+    serviceDate,
+    serviceTime,
+    slot: buildServiceTimeSlot(serviceDate, serviceTime),
+    respondedAt:
+      value.respondedAt
+      || value.responded_at
+      || value.timestamp
+      || new Date().toISOString(),
+  };
+}
+
+function acceptedAssignmentIdentityKey(entry = {}) {
+  return `${String(entry.orgId || '').trim()}:${String(entry.serviceId || '').trim()}`;
+}
+
+function findAcceptedAssignmentConflict(entries = [], candidateValue = {}) {
+  const candidate = normalizeAcceptedAssignmentEntry(candidateValue);
+  if (!candidate?.slot) return null;
+
+  for (const rawEntry of Array.isArray(entries) ? entries : []) {
+    const entry = normalizeAcceptedAssignmentEntry(rawEntry);
+    if (!entry?.slot) continue;
+    if (acceptedAssignmentIdentityKey(entry) === acceptedAssignmentIdentityKey(candidate)) {
+      continue;
+    }
+    if (entry.slot === candidate.slot) {
+      return entry;
+    }
+  }
+
+  return null;
+}
+
 function passwordResetKey(orgId, email) {
   return `${orgKey(orgId, 'passwordReset')}:${email}`;
 }
@@ -2587,6 +2773,54 @@ export async function onRequest(context) {
       peopleById,
       peopleByEmail,
     );
+    const serviceDate = normalizeDateKey(updated.date || updated.serviceDate || '');
+    if (serviceDate && Array.isArray(mergedPlan.team) && mergedPlan.team.length > 0) {
+      const orgBlockouts = await kvGet(env, orgKey(orgId, 'blockouts'), []);
+      const directBlockedNames = new Set(
+        mergeBlockoutEntries(orgBlockouts)
+          .filter((entry) => entry.date === serviceDate)
+          .map((entry) => normalizeLower(entry.name || ''))
+          .filter(Boolean),
+      );
+      const teamEmails = [...new Set(
+        mergedPlan.team
+          .map((member) => {
+            const linkedPerson = getLinkedTeamMemberPerson(member, peopleById, peopleByEmail);
+            return normalizeLower(member?.email || linkedPerson?.email || '');
+          })
+          .filter(Boolean),
+      )];
+      const globalBlockoutsByEmail = new Map(
+        await Promise.all(teamEmails.map(async (email) => [
+          email,
+          mergeBlockoutEntries(await kvGet(env, globalMemberBlockoutsKey(email), []))
+            .filter((entry) => entry.date === serviceDate),
+        ])),
+      );
+      const blockedMembers = mergedPlan.team.flatMap((member) => {
+        const linkedPerson = getLinkedTeamMemberPerson(member, peopleById, peopleByEmail);
+        const memberEmail = normalizeLower(member?.email || linkedPerson?.email || '');
+        const memberName = String(member?.name || linkedPerson?.name || '').trim();
+        const memberBlockouts = memberEmail ? (globalBlockoutsByEmail.get(memberEmail) || []) : [];
+        const isBlocked =
+          memberBlockouts.length > 0
+          || (memberName && directBlockedNames.has(normalizeLower(memberName)));
+        if (!isBlocked) return [];
+        return [{
+          personId: String(member?.personId || linkedPerson?.id || '').trim(),
+          name: memberName || memberEmail || 'Team member',
+          email: memberEmail,
+          role: String(member?.role || '').trim(),
+          date: serviceDate,
+        }];
+      });
+      if (blockedMembers.length > 0) {
+        return json({
+          error: 'Some assigned members are unavailable on this date. Remove them before publishing.',
+          blockedMembers,
+        }, 409);
+      }
+    }
 
     updated.plan = {
       ...existingServicePlan,
@@ -2942,6 +3176,10 @@ export async function onRequest(context) {
     const people = await kvGet(env, orgKey(orgId, 'people'), []);
     const personByEmail = people.find(p => (p.email || '').toLowerCase() === personId);
     const personUUID = personByEmail?.id || null;
+    const responseEmail = normalizeLower(
+      personByEmail?.email || (personId.includes('@') ? personId : ''),
+    );
+    if (!responseEmail) return json({ error: 'email required' }, 400);
     const resolvedName = personByEmail?.name || personName;
     const respondedAt = new Date().toISOString();
 
@@ -2967,6 +3205,31 @@ export async function onRequest(context) {
     const services = await kvGet(env, orgKey(orgId, 'services'), []);
     const svcIdx = services.findIndex(s => s.id === serviceId);
     const serviceName = svcIdx >= 0 ? (services[svcIdx].name || services[svcIdx].title || serviceId) : serviceId;
+    const serviceDate = svcIdx >= 0 ? (services[svcIdx].date || services[svcIdx].serviceDate || '') : '';
+    const serviceTime = svcIdx >= 0 ? (services[svcIdx].time || services[svcIdx].startTime || '') : '';
+    if (status === 'accepted') {
+      const acceptedAssignments = await kvGet(env, acceptedAssignmentsIndexKey(responseEmail), []);
+      const conflict = findAcceptedAssignmentConflict(acceptedAssignments, {
+        email: responseEmail,
+        orgId,
+        orgName: org.name || '',
+        serviceId,
+        serviceName,
+        serviceDate,
+        serviceTime,
+      });
+      if (conflict) {
+        return json({
+          error:
+            `You already accepted "${conflict.serviceName || 'another service'}" in `
+            + `${conflict.orgName || 'another organization'} on `
+            + `${conflict.serviceDate || 'that date'}`
+            + `${conflict.serviceTime ? ` at ${conflict.serviceTime}` : ''}. `
+            + 'Decline one assignment before accepting the other.',
+          conflict,
+        }, 409);
+      }
+    }
     if (svcIdx >= 0) {
       if (!services[svcIdx].assignmentResponses) services[svcIdx].assignmentResponses = {};
       const responseEntry = {
@@ -3030,12 +3293,31 @@ export async function onRequest(context) {
         serviceName,
         status,
         role,
-        personEmail: personId,
+        personEmail: responseEmail,
         declineReason,
         respondedAt,
       },
     });
     await kvPut(env, orgKey(orgId, 'messages'), msgs);
+
+    const acceptedAssignments = (await kvGet(env, acceptedAssignmentsIndexKey(responseEmail), []))
+      .map(normalizeAcceptedAssignmentEntry)
+      .filter(Boolean)
+      .filter((entry) => acceptedAssignmentIdentityKey(entry) !== `${orgId}:${serviceId}`);
+    if (status === 'accepted') {
+      const acceptedEntry = normalizeAcceptedAssignmentEntry({
+        email: responseEmail,
+        orgId,
+        orgName: org.name || '',
+        serviceId,
+        serviceName,
+        serviceDate,
+        serviceTime,
+        respondedAt,
+      });
+      if (acceptedEntry) acceptedAssignments.push(acceptedEntry);
+    }
+    await kvPut(env, acceptedAssignmentsIndexKey(responseEmail), acceptedAssignments);
 
     return json({ ok: true });
   }
@@ -3112,16 +3394,34 @@ export async function onRequest(context) {
     const body = await request.json().catch(() => ({}));
     const email = (body.email || '').trim().toLowerCase();
     if (!email) return json({ error: 'email required' }, 400);
-    const blockouts = await kvGet(env, orgKey(orgId, 'blockouts'), []);
-    const entry = {
-      id: body.id || `blk_${Date.now()}_${makeId(5)}`,
-      email, date: body.date, reason: body.reason || '',
-      created_at: new Date().toISOString(),
-    };
-    const filtered = blockouts.filter(b => !(b.email === email && b.date === entry.date));
-    filtered.push(entry);
-    await kvPut(env, orgKey(orgId, 'blockouts'), filtered);
-    return json({ ok: true, id: entry.id });
+    const entry = normalizeBlockoutEntry({
+      ...body,
+      email,
+    });
+    if (!entry) return json({ error: 'date required' }, 400);
+
+    const [orgBlockouts, globalBlockouts, people] = await Promise.all([
+      kvGet(env, orgKey(orgId, 'blockouts'), []),
+      kvGet(env, globalMemberBlockoutsKey(email), []),
+      kvGet(env, orgKey(orgId, 'people'), []),
+    ]);
+
+    const nextGlobalBlockouts = mergeBlockoutEntries(globalBlockouts, [entry]);
+    const nextOrgBlockouts = mergeBlockoutEntries(orgBlockouts, [entry]);
+    const { didUpdate, nextPeople } = syncPeopleBlockoutDates(
+      people,
+      email,
+      nextGlobalBlockouts,
+    );
+
+    const writes = [
+      kvPut(env, globalMemberBlockoutsKey(email), nextGlobalBlockouts),
+      kvPut(env, orgKey(orgId, 'blockouts'), nextOrgBlockouts),
+    ];
+    if (didUpdate) writes.push(kvPut(env, orgKey(orgId, 'people'), nextPeople));
+    await Promise.all(writes);
+
+    return json({ ok: true, id: entry.id, blockout: entry });
   }
 
   // ── DELETE /sync/blockout ────────────────────────────────────────────────
@@ -3129,20 +3429,94 @@ export async function onRequest(context) {
     const blkId = url.searchParams.get('id') || '';
     const email = (url.searchParams.get('email') || '').toLowerCase();
     const date = url.searchParams.get('date') || '';
-    let blockouts = await kvGet(env, orgKey(orgId, 'blockouts'), []);
-    if (blkId) blockouts = blockouts.filter(b => b.id !== blkId);
-    else if (email && date) blockouts = blockouts.filter(b => !(b.email === email && b.date === date));
-    await kvPut(env, orgKey(orgId, 'blockouts'), blockouts);
+    const orgBlockouts = await kvGet(env, orgKey(orgId, 'blockouts'), []);
+    const matchedEntry = mergeBlockoutEntries(orgBlockouts).find((entry) => {
+      if (blkId && entry.id === blkId) return true;
+      if (email && date) {
+        return entry.email === normalizeLower(email) && entry.date === normalizeDateKey(date);
+      }
+      return false;
+    });
+    const targetEmail = normalizeLower(email || matchedEntry?.email || '');
+    const [globalBlockouts, people] = targetEmail
+      ? await Promise.all([
+          kvGet(env, globalMemberBlockoutsKey(targetEmail), []),
+          kvGet(env, orgKey(orgId, 'people'), []),
+        ])
+      : [[], []];
+
+    const nextOrgBlockouts = removeBlockoutEntries(orgBlockouts, {
+      id: blkId,
+      email: targetEmail,
+      date,
+    });
+    const nextGlobalBlockouts = targetEmail
+      ? removeBlockoutEntries(globalBlockouts, {
+          id: blkId,
+          email: targetEmail,
+          date,
+        })
+      : [];
+
+    const writes = [kvPut(env, orgKey(orgId, 'blockouts'), nextOrgBlockouts)];
+    if (targetEmail) {
+      writes.push(kvPut(env, globalMemberBlockoutsKey(targetEmail), nextGlobalBlockouts));
+      const { didUpdate, nextPeople } = syncPeopleBlockoutDates(
+        people,
+        targetEmail,
+        nextGlobalBlockouts,
+      );
+      if (didUpdate) writes.push(kvPut(env, orgKey(orgId, 'people'), nextPeople));
+    }
+    await Promise.all(writes);
     return json({ ok: true });
   }
 
   // ── GET /sync/blockouts ──────────────────────────────────────────────────
   if (route === 'blockouts' && method === 'GET') {
-    let blockouts = await kvGet(env, orgKey(orgId, 'blockouts'), []);
-    const dateFilter = url.searchParams.get('date');
-    const emailFilter = url.searchParams.get('email');
-    if (dateFilter) blockouts = blockouts.filter(b => b.date === dateFilter);
-    if (emailFilter) blockouts = blockouts.filter(b => b.email === emailFilter.toLowerCase());
+    const dateFilter = normalizeDateKey(url.searchParams.get('date') || '');
+    const emailFilter = normalizeLower(url.searchParams.get('email') || '');
+
+    let blockouts = [];
+    if (emailFilter) {
+      blockouts = mergeBlockoutEntries(
+        await kvGet(env, globalMemberBlockoutsKey(emailFilter), []),
+      );
+    } else {
+      const [orgBlockouts, people] = await Promise.all([
+        kvGet(env, orgKey(orgId, 'blockouts'), []),
+        kvGet(env, orgKey(orgId, 'people'), []),
+      ]);
+      const normalizedPeople = Array.isArray(people) ? people : [];
+      const peopleByEmail = new Map(
+        normalizedPeople
+          .map((person) => [normalizeLower(person?.email || ''), person])
+          .filter(([email]) => Boolean(email)),
+      );
+      const globalBlockoutLists = await Promise.all(
+        Array.from(peopleByEmail.keys()).map(async (personEmail) => {
+          const person = peopleByEmail.get(personEmail);
+          const globalEntries = await kvGet(env, globalMemberBlockoutsKey(personEmail), []);
+          return (Array.isArray(globalEntries) ? globalEntries : []).map((entry) => ({
+            ...entry,
+            email: personEmail,
+            name: entry?.name || person?.name || '',
+          }));
+        }),
+      );
+      const peopleBlockouts = normalizedPeople.flatMap((person) => {
+        const personEmail = normalizeLower(person?.email || '');
+        return (Array.isArray(person?.blockout_dates) ? person.blockout_dates : []).map((entry) => ({
+          ...entry,
+          email: personEmail || normalizeLower(entry?.email || ''),
+          name: entry?.name || person?.name || '',
+        }));
+      });
+      blockouts = mergeBlockoutEntries(orgBlockouts, peopleBlockouts, ...globalBlockoutLists);
+    }
+
+    if (dateFilter) blockouts = blockouts.filter((entry) => entry.date === dateFilter);
+    if (emailFilter) blockouts = blockouts.filter((entry) => entry.email === emailFilter);
     return json(blockouts);
   }
 
