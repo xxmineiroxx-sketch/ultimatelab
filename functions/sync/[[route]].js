@@ -2620,14 +2620,17 @@ export async function onRequest(context) {
         preferenceKey: 'assignments',
       });
       if (targets.length > 0) {
+        const orgName = String(org?.name || '').trim() || 'Your organization';
+        const serviceName = updated.name || updated.title || serviceId;
         const pushResult = await sendPushToDevices(targets, {
-          title: 'New assignment',
-          body: `${updated.name || updated.title || serviceId} is ready for your response.`,
+          title: `${orgName} assignment`,
+          body: `${serviceName} is ready for your response in ${orgName}.`,
           data: {
             type: 'assignment',
             screen: 'AssignmentsTab',
             serviceId,
-            serviceName: updated.name || updated.title || serviceId,
+            serviceName,
+            orgName,
           },
         }, 'assignments').catch((error) => {
           console.log('[sync/push] assignment notify failed', error?.message || String(error));
