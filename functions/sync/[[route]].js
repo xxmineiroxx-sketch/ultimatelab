@@ -1062,7 +1062,7 @@ function collectNewPendingAssignments(previousTeam = [], nextTeam = [], peopleBy
     const linkedPerson = getLinkedTeamMemberPerson(member, peopleById, peopleByEmail);
     if (!linkedPerson) continue;
     const effectiveInviteStatus = getEffectiveInviteStatus(linkedPerson || {});
-    if (effectiveInviteStatus === 'pending' || effectiveInviteStatus === 'ready') continue;
+    if (effectiveInviteStatus !== 'registered') continue;
 
     const email = getTeamMemberEmail(member, peopleById, peopleByEmail);
     if (!email) continue;
@@ -1616,7 +1616,7 @@ function assignmentAlertEmailHtml(assignment) {
           <div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)">
             <p style="margin:0 0 10px;color:#E2E8F0;font-size:14px;font-weight:700">Need the app?</p>
             <p style="margin:0 0 12px;color:#94A3B8;font-size:13px;line-height:1.8">
-              Review the assignment and respond in Ultimate Playback. If you have not finished registration yet, complete it with your invited email address.
+              Review the assignment and respond in Ultimate Playback on the Assignments screen.
             </p>
             <p style="margin:0 0 12px;color:#CBD5E1;font-size:13px;line-height:1.8">
               <a href="${links.openApp}" style="color:#A5B4FC;text-decoration:none">Open Assignments</a>
