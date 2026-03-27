@@ -778,6 +778,21 @@ function buildPeopleIndexes(people = []) {
   return { byId, byEmail };
 }
 
+function getLinkedTeamMemberPerson(member = {}, peopleById = {}, peopleByEmail = {}) {
+  const personId = String(member?.personId || '').trim();
+  if (personId) {
+    const linkedById = peopleById[personId] || peopleById[normalizeLower(personId)] || null;
+    if (linkedById) return linkedById;
+  }
+
+  const directEmail = normalizeLower(member?.email || '');
+  if (directEmail && peopleByEmail[directEmail]) {
+    return peopleByEmail[directEmail];
+  }
+
+  return null;
+}
+
 function getAssignmentResponseLookupKeys(member = {}, peopleById = {}) {
   const keys = [];
   const email = normalizeLower(member?.email || '');
@@ -999,25 +1014,19 @@ function mergePlanTeamEntries(existingTeam = [], incomingTeam = []) {
   });
 }
 
-function getTeamMemberEmail(member = {}, peopleById = {}) {
+function getTeamMemberEmail(member = {}, peopleById = {}, peopleByEmail = {}) {
   const directEmail = normalizeLower(member?.email || '');
   if (directEmail) return directEmail;
 
-  const personId = String(member?.personId || '').trim();
-  if (!personId) return '';
-
-  const linkedPerson = peopleById[personId] || peopleById[normalizeLower(personId)] || null;
+  const linkedPerson = getLinkedTeamMemberPerson(member, peopleById, peopleByEmail);
   return normalizeLower(linkedPerson?.email || '');
 }
 
-function getTeamMemberName(member = {}, peopleById = {}) {
+function getTeamMemberName(member = {}, peopleById = {}, peopleByEmail = {}) {
   const directName = String(member?.name || '').trim();
   if (directName) return directName;
 
-  const personId = String(member?.personId || '').trim();
-  if (!personId) return '';
-
-  const linkedPerson = peopleById[personId] || peopleById[normalizeLower(personId)] || null;
+  const linkedPerson = getLinkedTeamMemberPerson(member, peopleById, peopleByEmail);
   return String(linkedPerson?.name || '').trim();
 }
 
@@ -1031,7 +1040,7 @@ function buildTeamEntryLookup(team = []) {
   return lookup;
 }
 
-function collectNewPendingAssignments(previousTeam = [], nextTeam = [], peopleById = {}) {
+function collectNewPendingAssignments(previousTeam = [], nextTeam = [], peopleById = {}, peopleByEmail = {}) {
   const previousLookup = buildTeamEntryLookup(previousTeam);
   const seen = new Set();
   const results = [];
@@ -1050,7 +1059,12 @@ function collectNewPendingAssignments(previousTeam = [], nextTeam = [], peopleBy
 
     if (nextStatus !== 'pending' || previousStatus === 'pending') continue;
 
-    const email = getTeamMemberEmail(member, peopleById);
+    const linkedPerson = getLinkedTeamMemberPerson(member, peopleById, peopleByEmail);
+    if (!linkedPerson) continue;
+    const effectiveInviteStatus = getEffectiveInviteStatus(linkedPerson || {});
+    if (effectiveInviteStatus === 'pending' || effectiveInviteStatus === 'ready') continue;
+
+    const email = getTeamMemberEmail(member, peopleById, peopleByEmail);
     if (!email) continue;
 
     const identityKey = `${email}|${normalizeRoleKey(member?.role || '')}`;
@@ -1060,7 +1074,7 @@ function collectNewPendingAssignments(previousTeam = [], nextTeam = [], peopleBy
     results.push({
       email,
       personId: String(member?.personId || '').trim(),
-      name: getTeamMemberName(member, peopleById),
+      name: getTeamMemberName(member, peopleById, peopleByEmail),
       role: String(member?.role || '').trim(),
     });
   }
@@ -1485,6 +1499,20 @@ function buildServiceScheduleLabel(dateValue, timeValue) {
   return dateLabel || timeLabel || 'Date and time to be confirmed';
 }
 
+function buildAssignmentAppLink(serviceId, decision = '') {
+  const params = new URLSearchParams();
+  const normalizedServiceId = String(serviceId || '').trim();
+  const normalizedDecision = String(decision || '').trim().toLowerCase();
+
+  if (normalizedServiceId) params.set('serviceId', normalizedServiceId);
+  if (normalizedDecision) params.set('decision', normalizedDecision);
+
+  const query = params.toString();
+  return query
+    ? `ultimateplayback://assignments?${query}`
+    : 'ultimateplayback://assignments';
+}
+
 function normalizeAssignmentEmailPayload(assignment = {}) {
   const roles = Array.isArray(assignment.roles)
     ? assignment.roles.map((role) => String(role || '').trim()).filter(Boolean)
@@ -1511,13 +1539,17 @@ function buildAssignmentAlertText(assignment) {
     normalized.serviceTime,
   );
   const roleLabel = normalized.roles.length === 1 ? 'Role' : 'Roles';
+  const acceptLink = buildAssignmentAppLink(normalized.serviceId, 'accept');
+  const declineLink = buildAssignmentAppLink(normalized.serviceId, 'decline');
 
   return [
     `You've been assigned to ${normalized.serviceName} in ${normalized.orgName}.`,
     `When: ${schedule}`,
     normalized.roles.length > 0 ? `${roleLabel}: ${normalized.roles.join(', ')}` : '',
     normalized.branchCity ? `Location: ${normalized.branchCity}` : '',
-    'Open Ultimate Playback to review and respond to this assignment.',
+    'Open Ultimate Playback on the Assignments screen to review and respond to this assignment.',
+    `Accept in app: ${acceptLink}`,
+    `Decline in app: ${declineLink}`,
     normalized.serviceId ? `Service ID: ${normalized.serviceId}` : '',
   ].filter(Boolean).join('\n\n');
 }
@@ -1525,9 +1557,9 @@ function buildAssignmentAlertText(assignment) {
 function assignmentAlertEmailHtml(assignment) {
   const normalized = normalizeAssignmentEmailPayload(assignment);
   const links = {
-    openApp: normalized.serviceId
-      ? `ultimateplayback://assignments?serviceId=${encodeURIComponent(normalized.serviceId)}`
-      : 'ultimateplayback://assignments',
+    openApp: buildAssignmentAppLink(normalized.serviceId),
+    accept: buildAssignmentAppLink(normalized.serviceId, 'accept'),
+    decline: buildAssignmentAppLink(normalized.serviceId, 'decline'),
     ios: PLAYBACK_IOS_URL,
     android: PLAYBACK_ANDROID_URL,
     desktop: PLAYBACK_DESKTOP_URL,
@@ -1567,16 +1599,27 @@ function assignmentAlertEmailHtml(assignment) {
             ${serviceId ? `<p style="margin:10px 0 0;color:#64748B;font-size:12px;line-height:1.6">Service ID: ${serviceId}</p>` : ''}
           </div>
 
-          <div style="text-align:center;margin-bottom:18px">
-            <a href="${links.openApp}" style="display:inline-block;background:linear-gradient(135deg,#6366F1 0%,#8B5CF6 100%);color:#FFFFFF;text-decoration:none;font-weight:800;font-size:16px;padding:15px 28px;border-radius:16px;box-shadow:0 10px 30px rgba(99,102,241,0.35)">
-              Open Ultimate Playback
-            </a>
+          <div style="margin-bottom:18px">
+            <div style="text-align:center;margin-bottom:10px">
+              <a href="${links.accept}" style="display:inline-block;background:linear-gradient(135deg,#10B981 0%,#059669 100%);color:#FFFFFF;text-decoration:none;font-weight:800;font-size:16px;padding:15px 28px;border-radius:16px;box-shadow:0 10px 30px rgba(16,185,129,0.28);margin-right:8px">
+                Accept in App
+              </a>
+              <a href="${links.decline}" style="display:inline-block;background:linear-gradient(135deg,#EF4444 0%,#DC2626 100%);color:#FFFFFF;text-decoration:none;font-weight:800;font-size:16px;padding:15px 28px;border-radius:16px;box-shadow:0 10px 30px rgba(239,68,68,0.24);margin-left:8px">
+                Decline in App
+              </a>
+            </div>
+            <p style="margin:0;text-align:center;color:#94A3B8;font-size:12px;line-height:1.7">
+              Both buttons open Ultimate Playback on the Assignments screen so you can confirm your decision there.
+            </p>
           </div>
 
           <div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)">
             <p style="margin:0 0 10px;color:#E2E8F0;font-size:14px;font-weight:700">Need the app?</p>
             <p style="margin:0 0 12px;color:#94A3B8;font-size:13px;line-height:1.8">
               Review the assignment and respond in Ultimate Playback. If you have not finished registration yet, complete it with your invited email address.
+            </p>
+            <p style="margin:0 0 12px;color:#CBD5E1;font-size:13px;line-height:1.8">
+              <a href="${links.openApp}" style="color:#A5B4FC;text-decoration:none">Open Assignments</a>
             </p>
             <p style="margin:0;color:#CBD5E1;font-size:13px;line-height:1.8">
               <a href="${links.ios}" style="color:#A5B4FC;text-decoration:none">iPhone</a>
@@ -2525,11 +2568,12 @@ export async function onRequest(context) {
         : (plans[serviceId]?.team || existingServicePlan.team || []),
       serviceId,
     };
-    const { byId: peopleById } = buildPeopleIndexes(people);
+    const { byId: peopleById, byEmail: peopleByEmail } = buildPeopleIndexes(people);
     const newPendingAssignments = collectNewPendingAssignments(
       previousTeam,
       mergedPlan.team || [],
       peopleById,
+      peopleByEmail,
     );
 
     updated.plan = {
