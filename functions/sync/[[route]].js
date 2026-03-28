@@ -63,6 +63,228 @@ function sanitizeStemSlot(value, fallback = 'track') {
   return normalized || fallback;
 }
 
+function normalizeStemToken(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+const STEM_TYPE_ALIASES = {
+  drums: [
+    'drums', 'drum', 'kit', 'kick', 'snare', 'tom', 'toms',
+    'cymbal', 'cymbals', 'overhead', 'overheads', 'perc', 'percussion', 'bateria',
+  ],
+  bass: ['bass', 'baixo', 'subbass', 'sub_bass'],
+  guitars: [
+    'guitar', 'guitars', 'gtr', 'lead_guitar', 'rhythm_guitar',
+    'electric_guitar', 'acoustic_guitar', 'violao',
+  ],
+  keys: [
+    'keys', 'key', 'keyboard', 'keyboardist', 'teclas',
+    'piano', 'rhodes', 'synth', 'synthpad', 'synth_pad', 'organ',
+  ],
+  vocals: ['vocals', 'vocal', 'vox', 'voice', 'voz', 'lead_vocal', 'lead_vox'],
+  strings: ['strings', 'string', 'cordas'],
+  click: ['click', 'metronome'],
+  guide: ['guide', 'guia', 'voice_guide', 'voiceguide', 'cue', 'ensaio', 'voz_ensaio'],
+  pad: ['pad', 'pads', 'drone', 'ambient'],
+  full_mix: ['full_mix', 'fullmix', 'stereo_mix', 'stereomix', 'master', 'instrumental', 'playback'],
+  loop: ['loop', 'loops'],
+  arpeggio: ['arpeggio', 'arp', 'arpej'],
+  harmony_soprano: ['harmony_soprano', 'soprano', 'voice1', 'bgv1'],
+  harmony_alto: ['harmony_alto', 'alto', 'contralto', 'voice2', 'bgv2'],
+  harmony_tenor: ['harmony_tenor', 'tenor', 'voice3', 'bgv3'],
+  harmony_bgv: ['harmony_bgv', 'harmony', 'harmonies', 'backing_vocal', 'backing_vocals', 'choir', 'bgv'],
+};
+
+const STEM_TYPE_ALIAS_LOOKUP = Object.fromEntries(
+  Object.entries(STEM_TYPE_ALIASES).flatMap(([canonical, aliases]) =>
+    aliases.map((alias) => [normalizeStemToken(alias), canonical])),
+);
+
+function inferCanonicalStemType(...values) {
+  const tokens = new Set();
+  values.forEach((value) => {
+    const normalized = normalizeStemToken(value);
+    if (!normalized) return;
+    tokens.add(normalized);
+    normalized.split(/_+/).forEach((part) => {
+      if (part) tokens.add(part);
+    });
+  });
+  for (const token of tokens) {
+    if (STEM_TYPE_ALIAS_LOOKUP[token]) return STEM_TYPE_ALIAS_LOOKUP[token];
+  }
+  return '';
+}
+
+function canonicalizeStemType(rawType, ...hints) {
+  const inferred = inferCanonicalStemType(rawType, ...hints);
+  if (inferred) return inferred;
+  const normalized = sanitizeStemSlot(rawType, 'other');
+  if (normalized === 'percussion') return 'drums';
+  if (['piano', 'synth', 'organ'].includes(normalized)) return 'keys';
+  return normalized;
+}
+
+function stemValueUrl(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value !== 'object') return '';
+  return String(
+    value.url
+    || value.uri
+    || value.localUri
+    || value.file_url
+    || value.fileUrl
+    || value.downloadUrl
+    || value.streamUrl
+    || '',
+  ).trim();
+}
+
+function humanizeStemLabel(value) {
+  const raw = String(value || '')
+    .replace(/^harmony_/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return 'Track';
+  return raw.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function makeUniqueStemKey(base, used = new Set()) {
+  const seed = sanitizeStemSlot(base, 'track');
+  let key = seed;
+  let suffix = 2;
+  while (used.has(key)) {
+    key = `${seed}_${suffix}`;
+    suffix += 1;
+  }
+  used.add(key);
+  return key;
+}
+
+function harmonyPartFromStemType(type) {
+  switch (type) {
+    case 'harmony_soprano': return 'soprano';
+    case 'harmony_alto': return 'alto';
+    case 'harmony_tenor': return 'tenor';
+    case 'harmony_bgv': return 'bgv';
+    default: return '';
+  }
+}
+
+function normalizeHarmonyPart(value) {
+  const canonical = canonicalizeStemType(value);
+  if (canonical.startsWith('harmony_')) {
+    return canonical.replace(/^harmony_/, '');
+  }
+  const normalized = normalizeStemToken(value);
+  return normalized ? normalized.replace(/^harmony_/, '') : '';
+}
+
+function normalizeStemPayload(input = {}) {
+  const payload = input && typeof input === 'object' ? { ...input } : {};
+  const usedStemKeys = new Set();
+  const normalizedStems = {};
+  const normalizedHarmonies = {};
+  let hasStemEntries = false;
+
+  const pushStem = (rawKey, rawValue, options = {}) => {
+    const { mirrorHarmony = true } = options;
+    const url = stemValueUrl(rawValue);
+    if (!url) return;
+
+    const rawLabel = clipText(
+      rawValue && typeof rawValue === 'object' ? rawValue.label : '',
+      160,
+    );
+    const rawType = rawValue && typeof rawValue === 'object' ? rawValue.type : rawKey;
+    const type = canonicalizeStemType(rawType || rawKey, rawLabel, rawKey);
+    const label = rawLabel || humanizeStemLabel(rawKey || type);
+
+    if (type === 'click' && !payload.click_track) payload.click_track = url;
+    if (type === 'guide' && !payload.voice_guide) payload.voice_guide = url;
+    if (type === 'pad' && !payload.pad_track) payload.pad_track = url;
+    if (type === 'full_mix') {
+      payload.full_mix = url;
+      payload.fullMix = url;
+    }
+
+    const harmonyPart = harmonyPartFromStemType(type);
+    if (mirrorHarmony && harmonyPart && !normalizedHarmonies[harmonyPart]) {
+      normalizedHarmonies[harmonyPart] = url;
+    }
+
+    const stemKey = makeUniqueStemKey(type || rawKey || 'track', usedStemKeys);
+    normalizedStems[stemKey] = rawValue && typeof rawValue === 'object'
+      ? { ...rawValue, type, label, url }
+      : { type, label, url };
+    hasStemEntries = true;
+  };
+
+  if (Array.isArray(payload.stems)) {
+    payload.stems.forEach((entry, index) => {
+      pushStem(entry?.id || entry?.key || `stem_${index}`, entry);
+    });
+  } else if (payload.stems && typeof payload.stems === 'object') {
+    Object.entries(payload.stems).forEach(([rawKey, rawValue]) => {
+      pushStem(rawKey, rawValue);
+    });
+  }
+
+  if (payload.harmonies && typeof payload.harmonies === 'object') {
+    Object.entries(payload.harmonies).forEach(([rawPart, rawValue]) => {
+      const url = stemValueUrl(rawValue);
+      if (!url) return;
+      const part = normalizeHarmonyPart(
+        rawPart
+        || (rawValue && typeof rawValue === 'object' ? rawValue.type : '')
+        || (rawValue && typeof rawValue === 'object' ? rawValue.label : ''),
+      );
+      if (!part) return;
+      normalizedHarmonies[part] = url;
+      const harmonyType = `harmony_${part}`;
+      const duplicate = Object.values(normalizedStems).some((entry) =>
+        entry?.type === harmonyType && stemValueUrl(entry) === url);
+      if (!duplicate) {
+        pushStem(
+          harmonyType,
+          {
+            type: harmonyType,
+            label: rawValue && typeof rawValue === 'object'
+              ? rawValue.label || humanizeStemLabel(part)
+              : humanizeStemLabel(part),
+            url,
+          },
+          { mirrorHarmony: false },
+        );
+      }
+    });
+  }
+
+  const clickTrack = stemValueUrl(payload.click_track);
+  if (clickTrack) payload.click_track = clickTrack;
+  const voiceGuide = stemValueUrl(payload.voice_guide);
+  if (voiceGuide) payload.voice_guide = voiceGuide;
+  const padTrack = stemValueUrl(payload.pad_track);
+  if (padTrack) payload.pad_track = padTrack;
+  const fullMix = stemValueUrl(payload.full_mix || payload.fullMix);
+  if (fullMix) {
+    payload.full_mix = fullMix;
+    payload.fullMix = fullMix;
+  }
+
+  if (hasStemEntries) payload.stems = normalizedStems;
+  if (Object.keys(normalizedHarmonies).length) payload.harmonies = normalizedHarmonies;
+  return payload;
+}
+
 function stemObjectPublicUrl(origin, key) {
   return `${origin}/sync/stems/source/${encodeURIComponent(key)}`;
 }
@@ -195,6 +417,128 @@ async function kvDelete(env, key) {
 
 function orgKey(orgId, type) {
   return `org:${orgId}:${type}`;
+}
+
+// ── Analytics Engine ──────────────────────────────────────────────────────
+// Fire-and-forget. Never throws. Safe to call anywhere.
+function trackEvent(env, orgId, event, metadata = {}) {
+  if (!env.UM_ANALYTICS) return;
+  try {
+    env.UM_ANALYTICS.writeDataPoint({
+      blobs: [orgId || '', event, JSON.stringify(metadata).slice(0, 512)],
+      doubles: [Date.now()],
+      indexes: [orgId || ''],
+    });
+  } catch (err) {
+    console.log('[analytics] writeDataPoint failed:', err?.message);
+  }
+}
+
+// ── Cloudflare Turnstile ──────────────────────────────────────────────────
+// Skips gracefully when TURNSTILE_SECRET is not set (local dev / preview).
+async function verifyTurnstile(env, token, ip = '') {
+  const secret = env.TURNSTILE_SECRET || '';
+  if (!secret) return { success: true, skipped: true };
+  if (!token) return { success: false, error: 'Human verification token required. Please refresh and try again.' };
+  try {
+    const form = new FormData();
+    form.append('secret', secret);
+    form.append('response', token);
+    if (ip) form.append('remoteip', ip);
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
+    if (!res.ok) return { success: true, skipped: true }; // fail open on Turnstile outage
+    const data = await res.json();
+    if (data.success) return { success: true };
+    const code = (data['error-codes'] || [])[0] || 'verification-failed';
+    return { success: false, error: `Verification failed (${code}). Please try again.` };
+  } catch {
+    return { success: true, skipped: true }; // fail open on network error
+  }
+}
+
+// ── D1 Write-Through Helpers ──────────────────────────────────────────────
+// All writes are fire-and-forget so they never block KV latency.
+function _d1Run(env, stmt) {
+  if (!env.UM_DB) return;
+  Promise.resolve().then(() => stmt.run()).catch(err => {
+    console.log('[d1] write-through error:', err?.message || String(err));
+  });
+}
+
+function d1UpsertOrg(env, org) {
+  if (!org?.orgId) return;
+  _d1Run(env, env.UM_DB?.prepare(
+    `INSERT INTO orgs (orgId, name, city, secretKeyHash, createdAt, parentOrgId)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(orgId) DO UPDATE SET
+       name=excluded.name, city=excluded.city,
+       secretKeyHash=excluded.secretKeyHash, parentOrgId=excluded.parentOrgId`
+  ).bind(org.orgId, org.name||'', org.city||'', org.secretKeyHash||'',
+    org.createdAt||new Date().toISOString(), org.parentOrgId||null));
+}
+
+function d1UpsertService(env, orgId, svc) {
+  if (!svc?.id) return;
+  _d1Run(env, env.UM_DB?.prepare(
+    `INSERT INTO services (id, orgId, name, date, time, type, locked, publishedAt, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name=excluded.name, date=excluded.date, time=excluded.time,
+       type=excluded.type, locked=excluded.locked, publishedAt=excluded.publishedAt`
+  ).bind(svc.id, orgId, svc.name||svc.title||'',
+    svc.date||svc.serviceDate||'', svc.time||svc.startTime||'',
+    svc.type||'standard', svc.locked?1:0, svc.publishedAt||null,
+    svc.createdAt||new Date().toISOString()));
+}
+
+function d1UpsertPerson(env, orgId, p) {
+  if (!p?.id) return;
+  _d1Run(env, env.UM_DB?.prepare(
+    `INSERT INTO people (id, orgId, email, name, phone, role, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       email=excluded.email, name=excluded.name,
+       phone=excluded.phone, role=excluded.role`
+  ).bind(p.id, orgId, normalizeLower(p.email||''), p.name||'',
+    p.phone||'', p.role||(p.roles?.[0])||'',
+    p.createdAt||new Date().toISOString()));
+}
+
+function d1UpsertSong(env, orgId, s) {
+  if (!s?.id) return;
+  _d1Run(env, env.UM_DB?.prepare(
+    `INSERT INTO songs (id, orgId, title, artist, key, bpm, tags, notes, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       title=excluded.title, artist=excluded.artist, key=excluded.key,
+       bpm=excluded.bpm, tags=excluded.tags, notes=excluded.notes`
+  ).bind(s.id, orgId, s.title||'', s.artist||'', s.key||'',
+    Number.isFinite(Number(s.bpm)) ? Number(s.bpm) : null,
+    JSON.stringify(Array.isArray(s.tags) ? s.tags : []),
+    s.notes||s.chordChart||'', s.createdAt||new Date().toISOString()));
+}
+
+function d1UpsertAssignmentResponse(env, orgId, serviceId, { personEmail, personId, role, status, note, respondedAt }) {
+  _d1Run(env, env.UM_DB?.prepare(
+    `INSERT INTO assignment_responses (id, orgId, serviceId, personEmail, personId, role, status, note, respondedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT DO NOTHING`
+  ).bind(makeId(16), orgId, serviceId,
+    normalizeLower(personEmail||''), normalizeLower(personId||''),
+    role||'', status||'pending', note||'',
+    respondedAt||new Date().toISOString()));
+}
+
+function d1InsertMessage(env, orgId, msg) {
+  if (!msg?.id) return;
+  _d1Run(env, env.UM_DB?.prepare(
+    `INSERT OR IGNORE INTO messages (id, orgId, fromEmail, toEmail, subject, body, read, messageType, serviceId, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(msg.id, orgId, normalizeLower(msg.fromEmail||''),
+    normalizeLower(msg.to||''), msg.subject||'',
+    msg.message||msg.body||'', msg.read?1:0,
+    msg.messageType||'general', msg.serviceId||null,
+    msg.timestamp||msg.createdAt||new Date().toISOString()));
 }
 
 function pickDefinedStemFields(value = {}) {
@@ -2610,6 +2954,10 @@ export async function onRequest(context) {
       }
     }
 
+    // D1 write-through + analytics
+    d1UpsertOrg(env, org);
+    trackEvent(env, orgId, 'register_org', { name, city });
+
     // Return secret key ONCE — never stored in plain text
     return json({ ok: true, orgId, secretKey, name, city, language });
   }
@@ -2670,6 +3018,153 @@ export async function onRequest(context) {
     headers.set('Cache-Control', 'public, max-age=86400');
     headers.set('Accept-Ranges', 'bytes');
     return new Response(object.body, { headers });
+  }
+
+  // ── Public: GET /sync/cron/reminders — daily cron (CRON_SECRET protected) ─
+  // Separate from the per-org handler below; runs across ALL orgs in one call.
+  // Optional ?daysOut=3 or ?daysOut=1 to restrict which reminder window to fire.
+  if (route === 'cron/reminders' && method === 'GET') {
+    const cronSecret = env.CRON_SECRET || '';
+    const providedSecret = request.headers.get('x-cron-secret') || url.searchParams.get('secret') || '';
+    if (!cronSecret || providedSecret !== cronSecret) {
+      return new Response('Unauthorized', { status: 401, headers: CORS_HEADERS });
+    }
+
+    // Optional filter: only send reminders for a specific days-out window
+    const daysOutParam = url.searchParams.get('daysOut');
+    const TARGET_DAYS = daysOutParam
+      ? [parseInt(daysOutParam, 10)].filter(n => n > 0 && n < 30)
+      : [3, 1];
+
+    // List all org meta keys to discover org IDs
+    let orgIds = [];
+    try {
+      let cursor = undefined;
+      do {
+        const listResult = await env.STORE.list({ prefix: 'org:', cursor, limit: 1000 });
+        for (const key of listResult.keys) {
+          // Org root records are stored as "org:{orgId}" (exactly 2 colon-separated parts)
+          const parts = key.name.split(':');
+          if (parts.length === 2 && parts[0] === 'org') orgIds.push(parts[1]);
+        }
+        cursor = listResult.list_complete ? undefined : listResult.cursor;
+      } while (cursor);
+    } catch (err) {
+      console.log('[cron/reminders] KV list error', err?.message || String(err));
+    }
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const results = [];
+
+    for (const oid of orgIds) {
+      try {
+        const orgMeta = await kvGet(env, `org:${oid}`, null);
+        if (!orgMeta || !orgMeta.orgId) continue;
+
+        const [services, plans, people, pushDevices] = await Promise.all([
+          kvGet(env, orgKey(oid, 'services'), []),
+          kvGet(env, orgKey(oid, 'plans'), {}),
+          kvGet(env, orgKey(oid, 'people'), []),
+          getPushDevices(env, oid),
+        ]);
+
+        const emailById = {};
+        for (const p of (Array.isArray(people) ? people : [])) {
+          if (p.id) emailById[normalizeLower(p.id)] = { email: normalizeLower(p.email || ''), name: p.name || '' };
+        }
+
+        const sentKey = orgKey(oid, 'remindersSent');
+        const remindersSent = await kvGet(env, sentKey, {});
+        const newlySent = {};
+        let emailSent = 0, msgCreated = 0, pushSent = 0;
+
+        for (const service of (Array.isArray(services) ? services : [])) {
+          const rawDate = service.date || service.serviceDate || '';
+          if (!rawDate) continue;
+          const serviceDate = rawDate.slice(0, 10);
+          const diffMs = new Date(serviceDate + 'T00:00:00Z') - new Date(todayStr + 'T00:00:00Z');
+          const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+          if (!TARGET_DAYS.includes(diffDays)) continue;
+
+          const plan = plans[service.id] || {};
+          const team = Array.isArray(plan.team) ? plan.team : Array.isArray(service.team) ? service.team : [];
+          if (team.length === 0) continue;
+
+          const serviceName = service.name || service.title || 'Service';
+          const orgName = orgMeta.name || 'Your Church';
+          const songs = Array.isArray(plan.songs) ? plan.songs.map(s => s.title || s.name || '').filter(Boolean) : [];
+
+          for (const member of team) {
+            let memberEmail = normalizeLower(member.email || '');
+            let memberName = String(member.name || '').trim();
+            if (!memberEmail && member.personId) {
+              const linked = emailById[normalizeLower(member.personId)] || null;
+              if (linked) { memberEmail = linked.email; memberName = memberName || linked.name; }
+            }
+            if (!memberEmail) continue;
+
+            const dupKey = `${service.id}::${diffDays}d::${memberEmail}`;
+            if (remindersSent[dupKey] || newlySent[dupKey]) continue;
+
+            const roles = member.role ? [member.role] : [];
+            const dayLabel = diffDays === 1 ? 'tomorrow' : 'in 3 days';
+            const subjectPrefix = diffDays === 1 ? '⚠️ Tomorrow' : '📅 Coming up in 3 days';
+            const schedule = buildServiceScheduleLabel(serviceDate, service.time || service.startTime || '');
+
+            // Email
+            const resendApiKey = env.RESEND_API_KEY || '';
+            if (resendApiKey) {
+              try {
+                const fromEmail = env.ASSIGNMENT_FROM_EMAIL || env.INVITE_FROM_EMAIL || 'ultimatemusician@ultimatelabs.co';
+                const fromName = env.ASSIGNMENT_FROM_NAME || env.INVITE_FROM_NAME || 'Ultimate Musician';
+                const songsLine = songs.length > 0 ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Songs:</strong> ${escapeHtml(songs.join(', '))}</p>` : '';
+                const songsText = songs.length > 0 ? `Songs: ${songs.join(', ')}` : '';
+                const htmlBody = `<div style="background:#020617;padding:32px 20px;font-family:Arial,sans-serif;color:#F8FAFC"><div style="max-width:560px;margin:0 auto;background:linear-gradient(180deg,#0B1120 0%,#0F172A 100%);border:1px solid #1F2937;border-radius:28px;overflow:hidden"><div style="padding:32px 32px 18px"><p style="margin:0 0 10px;color:#FCD34D;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase">Service Reminder</p><h1 style="margin:0 0 12px;font-size:28px;line-height:1.1;color:#FFFFFF">${escapeHtml(subjectPrefix)}: ${escapeHtml(serviceName)}</h1><p style="margin:0;color:#CBD5E1;font-size:15px;line-height:1.7">Hi ${escapeHtml(memberName || 'there')}, <strong>${escapeHtml(serviceName)}</strong> is <strong style="color:#FCD34D">${escapeHtml(dayLabel)}</strong>.</p></div><div style="padding:0 32px 32px"><div style="margin:18px 0 24px;padding:18px 20px;border:1px solid #1E293B;border-radius:20px;background:#020617"><p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">When:</strong> ${escapeHtml(schedule)}</p>${roles.length > 0 ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Your role:</strong> ${escapeHtml(roles.join(', '))}</p>` : ''}${songsLine}</div><div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)"><p style="margin:0 0 8px;color:#E2E8F0;font-size:14px;font-weight:700">Please make sure you:</p><ul style="margin:0;padding-left:20px;color:#94A3B8;font-size:13px;line-height:2"><li>Have all songs covered / learned</li><li>Reviewed your part and notes</li><li>Confirmed availability in Ultimate Playback → Assignments</li></ul></div></div></div></div>`;
+                const textBody = [`Reminder: ${serviceName} is ${dayLabel}.`, `When: ${schedule}`, roles.length > 0 ? `Your role: ${roles.join(', ')}` : '', songsText, '', 'Please make sure you:', '• Have all songs covered / learned', '• Confirmed your availability in Ultimate Playback → Assignments'].filter(Boolean).join('\n');
+                const emailRes = await fetch('https://api.resend.com/emails', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendApiKey}` },
+                  body: JSON.stringify({ from: `${fromName} <${fromEmail}>`, to: [memberEmail], subject: `${subjectPrefix}: ${serviceName} — ${orgName}`, html: htmlBody, text: textBody }),
+                });
+                if (emailRes.ok) emailSent++;
+                else console.log('[cron/reminders] email fail', oid, memberEmail, await emailRes.text());
+              } catch (e) { console.log('[cron/reminders] email err', oid, memberEmail, e?.message); }
+            }
+
+            // In-app message
+            try {
+              const msgs = await kvGet(env, orgKey(oid, 'messages'), []);
+              msgs.unshift({ id: makeId(), fromEmail: 'system@ultimatelabs.co', fromName: orgName, subject: `Reminder: ${serviceName} is ${dayLabel}`, message: `Hi ${memberName || 'there'}, ${serviceName} is ${dayLabel}.\n\n${songs.length > 0 ? `Songs: ${songs.join(', ')}.\n\n` : ''}Make sure you have your songs covered and availability confirmed.`, to: memberEmail, timestamp: new Date().toISOString(), read: false, replies: [], hiddenFor: [], visibility: 'conversation', messageType: 'reminder', isSystemMsg: false, serviceId: service.id });
+              await kvPut(env, orgKey(oid, 'messages'), msgs);
+              msgCreated++;
+            } catch (e) { console.log('[cron/reminders] msg err', oid, e?.message); }
+
+            // Push
+            try {
+              const targets = filterPushDevices(pushDevices, { emails: [memberEmail], preferenceKey: 'messages' });
+              if (targets.length > 0) {
+                await sendPushToDevices(targets, { title: `${diffDays === 1 ? '⚠️ Tomorrow' : '📅 In 3 days'}: ${serviceName}`, body: 'Make sure your songs are covered. Open Ultimate Playback for details.', data: { type: 'reminder', screen: 'AssignmentsTab', serviceId: service.id } }, 'messages');
+                pushSent += targets.length;
+              }
+            } catch (e) { console.log('[cron/reminders] push err', oid, e?.message); }
+
+            newlySent[dupKey] = new Date().toISOString();
+          }
+        }
+
+        // Persist dedup log with 8-day TTL cleanup
+        const merged = { ...remindersSent, ...newlySent };
+        const cutoff = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+        for (const k of Object.keys(merged)) { if (merged[k] < cutoff) delete merged[k]; }
+        await kvPut(env, sentKey, merged);
+
+        results.push({ orgId: oid, emailSent, msgCreated, pushSent, newReminders: Object.keys(newlySent).length });
+      } catch (orgErr) {
+        results.push({ orgId: oid, error: orgErr?.message || String(orgErr) });
+      }
+    }
+
+    return json({ ok: true, orgsProcessed: orgIds.length, results });
   }
 
   // ── All routes below require auth ────────────────────────────────────────
@@ -2896,6 +3391,16 @@ export async function onRequest(context) {
       kvPut(env, orgKey(orgId, 'blockouts'), mergedBlockouts),
     ]);
 
+    // D1 write-through — sync all changed records
+    for (const s of Object.values(songMap)) d1UpsertSong(env, orgId, s);
+    for (const p of mergedPeople) d1UpsertPerson(env, orgId, p);
+    for (const svc of Object.values(servicesMap)) d1UpsertService(env, orgId, svc);
+    trackEvent(env, orgId, 'library_push', {
+      songs: Object.keys(songMap).length,
+      people: mergedPeople.length,
+      services: Object.values(servicesMap).length,
+    });
+
     return json({
       ok: true,
       songs: Object.keys(songMap).length,
@@ -3090,6 +3595,10 @@ export async function onRequest(context) {
         }
       }
     }
+
+    // D1 write-through for published service + analytics
+    d1UpsertService(env, orgId, { ...updated, publishedAt: new Date().toISOString() });
+    trackEvent(env, orgId, 'publish', { serviceId, emailSent, pushSent: pushCount });
 
     return json({
       ok: true,
@@ -3510,6 +4019,13 @@ export async function onRequest(context) {
     }
     await kvPut(env, acceptedAssignmentsIndexKey(responseEmail), acceptedAssignments);
 
+    // D1 write-through + analytics
+    d1UpsertAssignmentResponse(env, orgId, serviceId, {
+      personEmail: responseEmail, personId, role, status,
+      note: declineReason || '', respondedAt,
+    });
+    trackEvent(env, orgId, 'assignment_respond', { serviceId, status, role });
+
     return json({ ok: true });
   }
 
@@ -3715,15 +4231,15 @@ export async function onRequest(context) {
   // Called by CineStage server or desktop uploader after processing to store results in KV.
   // Body: { songId, title, stems, harmonies, key, bpm, jobId, ...metadata }
   if (route === 'stems-store' && method === 'POST') {
-    const body = await request.json().catch(() => ({}));
+    const body = normalizeStemPayload(await request.json().catch(() => ({})));
     const { songId } = body;
     if (!songId) return json({ error: 'songId required' }, 400);
     const existing = await kvGet(env, orgKey(orgId, `stems:${songId}`), {});
-    const entry = {
+    const entry = normalizeStemPayload({
       ...existing,
       ...body,
       updatedAt: new Date().toISOString(),
-    };
+    });
     await kvPut(env, orgKey(orgId, `stems:${songId}`), entry);
     await syncSongLibraryStemSnapshot(env, orgId, songId, {
       ...entry,
@@ -3744,7 +4260,7 @@ export async function onRequest(context) {
     if (!songId) return json({ error: 'songId required' }, 400);
     const result = await kvGet(env, orgKey(orgId, `stems:${songId}`), null);
     if (!result) return json({ error: 'Not found', songId }, 404);
-    return json(result);
+    return json(normalizeStemPayload(result));
   }
 
   // ── GET /sync/org/profile ────────────────────────────────────────────────
@@ -3974,6 +4490,9 @@ export async function onRequest(context) {
   // Succeeds only when the person already exists in the org directory.
   if (route === 'auth/register' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
+    const cfIp = request.headers.get('CF-Connecting-IP') || '';
+    const tsResult = await verifyTurnstile(env, body.turnstileToken || '', cfIp);
+    if (!tsResult.success) return json({ error: tsResult.error }, 403);
     const raw = (body.identifier || body.email || '').trim();
     const { password = '', name = '' } = body;
     if (!raw || !password) return json({ error: 'identifier and password required' }, 400);
@@ -4038,6 +4557,9 @@ export async function onRequest(context) {
   // Accepts email or phone number as identifier.
   if (route === 'auth/login' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
+    const cfIp = request.headers.get('CF-Connecting-IP') || '';
+    const tsResult = await verifyTurnstile(env, body.turnstileToken || '', cfIp);
+    if (!tsResult.success) return json({ error: tsResult.error }, 403);
     const raw = (body.identifier || body.email || '').trim();
     const { password = '' } = body;
     if (!raw || !password) return json({ error: 'identifier and password required' }, 400);
@@ -4125,6 +4647,7 @@ export async function onRequest(context) {
     user.updatedAt = new Date().toISOString();
     users[canonicalEmail] = user;
     await kvPut(env, orgKey(orgId, 'users'), users);
+    trackEvent(env, orgId, 'login', { role });
     return json(buildAuthResponse({
       user,
       canonicalEmail,
@@ -4508,7 +5031,7 @@ export async function onRequest(context) {
     const { fromEmail = '', fromName = '', subject = '', message: msgText = '', to = 'admin' } = body;
     const msgs = await kvGet(env, orgKey(orgId, 'messages'), []);
     const normalizedTo = normalizeLower(to || 'admin') || 'admin';
-    msgs.push({
+    const newMsg = {
       id: makeId(),
       fromEmail,
       fromName,
@@ -4521,8 +5044,10 @@ export async function onRequest(context) {
       hiddenFor: [],
       visibility: to === 'all_team' ? 'broadcast' : 'conversation',
       messageType: 'conversation',
-    });
+    };
+    msgs.push(newMsg);
     await kvPut(env, orgKey(orgId, 'messages'), msgs);
+    d1InsertMessage(env, orgId, newMsg);
 
     try {
       const pushDevices = await getPushDevices(env, orgId);
@@ -4986,7 +5511,7 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     // Also update legacy stems:songId entry for backward compat
     if (status === 'COMPLETED' && result?.stems && job.songId) {
       const prev = await kvGet(env, orgKey(targetOrgId, `stems:${job.songId}`), {});
-      const entry = {
+      const entry = normalizeStemPayload({
         ...prev,
         songId: job.songId,
         title: job.input?.title,
@@ -5010,7 +5535,7 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
         bpm,
         jobId,
         updatedAt: job.updatedAt,
-      };
+      });
       await kvPut(env, orgKey(targetOrgId, `stems:${job.songId}`), entry);
       await syncSongLibraryStemSnapshot(env, targetOrgId, job.songId, {
         ...entry,
@@ -5337,6 +5862,319 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
       await kvPut(env, orgKey(orgId, 'library'), lib);
     }
     return json({ ok: true });
+  }
+
+  // ── POST /sync/send-reminders — send service reminders for this org ────────
+  // Called by admin (or by the cron helper below). Finds services in 1 or 3
+  // days and sends email + in-app message + push to every assigned team member.
+  // Deduplicates: each (serviceId, daysOut, memberEmail) triple is sent once.
+  if (route === 'send-reminders' && (method === 'POST' || method === 'GET')) {
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    const [services, plans, people, pushDevices] = await Promise.all([
+      kvGet(env, orgKey(orgId, 'services'), []),
+      kvGet(env, orgKey(orgId, 'plans'), {}),
+      kvGet(env, orgKey(orgId, 'people'), []),
+      getPushDevices(env, orgId),
+    ]);
+
+    // Build email index: personId → email, name
+    const emailById = {};
+    for (const p of (Array.isArray(people) ? people : [])) {
+      if (p.id) emailById[normalizeLower(p.id)] = { email: normalizeLower(p.email || ''), name: p.name || '' };
+    }
+
+    // Load sent-reminder log to avoid duplicates
+    const sentKey = orgKey(orgId, 'remindersSent');
+    const remindersSent = await kvGet(env, sentKey, {});
+
+    const daysOutParamOrg = url.searchParams.get('daysOut') || (await request.json().catch(() => ({}))).daysOut;
+    const TARGET_DAYS = daysOutParamOrg
+      ? [parseInt(daysOutParamOrg, 10)].filter(n => n > 0 && n < 30)
+      : [3, 1];
+    let emailSent = 0, emailFailed = 0, msgCreated = 0, pushSent = 0;
+
+    const newlySent = {};
+
+    for (const service of (Array.isArray(services) ? services : [])) {
+      const rawDate = service.date || service.serviceDate || '';
+      if (!rawDate) continue;
+      const serviceDate = rawDate.slice(0, 10); // YYYY-MM-DD
+
+      // How many days away is this service?
+      const diffMs = new Date(serviceDate + 'T00:00:00Z') - new Date(todayStr + 'T00:00:00Z');
+      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+      if (!TARGET_DAYS.includes(diffDays)) continue;
+
+      const plan = plans[service.id] || {};
+      const team = Array.isArray(plan.team) ? plan.team
+        : Array.isArray(service.team) ? service.team : [];
+
+      if (team.length === 0) continue;
+
+      const serviceName = service.name || service.title || 'Service';
+      const orgName = org.name || 'Your Church';
+      const songs = Array.isArray(plan.songs)
+        ? plan.songs.map(s => s.title || s.name || '').filter(Boolean)
+        : [];
+
+      for (const member of team) {
+        let memberEmail = normalizeLower(member.email || '');
+        let memberName = String(member.name || '').trim();
+
+        // Fall back to people index if email not on the team record
+        if (!memberEmail && member.personId) {
+          const linked = emailById[normalizeLower(member.personId)] || null;
+          if (linked) { memberEmail = linked.email; memberName = memberName || linked.name; }
+        }
+        if (!memberEmail) continue;
+
+        // Dedup key
+        const dupKey = `${service.id}::${diffDays}d::${memberEmail}`;
+        if (remindersSent[dupKey] || newlySent[dupKey]) continue;
+
+        const roles = member.role ? [member.role] : [];
+        const dayLabel = diffDays === 1 ? 'tomorrow' : 'in 3 days';
+        const subjectPrefix = diffDays === 1 ? '⚠️ Tomorrow' : '📅 Coming up in 3 days';
+
+        // ── 1. Email ────────────────────────────────────────────────────────
+        const resendApiKey = env.RESEND_API_KEY || '';
+        if (resendApiKey) {
+          try {
+            const fromEmail = env.ASSIGNMENT_FROM_EMAIL || env.INVITE_FROM_EMAIL || 'ultimatemusician@ultimatelabs.co';
+            const fromName = env.ASSIGNMENT_FROM_NAME || env.INVITE_FROM_NAME || 'Ultimate Musician';
+            const schedule = buildServiceScheduleLabel(serviceDate, service.time || service.startTime || '');
+            const songsLine = songs.length > 0
+              ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Songs:</strong> ${escapeHtml(songs.join(', '))}</p>`
+              : '';
+            const songsText = songs.length > 0 ? `Songs: ${songs.join(', ')}` : '';
+            const htmlBody = `
+              <div style="background:#020617;padding:32px 20px;font-family:Arial,sans-serif;color:#F8FAFC">
+                <div style="max-width:560px;margin:0 auto;background:linear-gradient(180deg,#0B1120 0%,#0F172A 100%);border:1px solid #1F2937;border-radius:28px;overflow:hidden;box-shadow:0 20px 60px rgba(2,6,23,0.45)">
+                  <div style="padding:32px 32px 18px;background:radial-gradient(circle at top left,rgba(99,102,241,0.22),transparent 55%),radial-gradient(circle at top right,rgba(245,158,11,0.12),transparent 40%)">
+                    <p style="margin:0 0 10px;color:#FCD34D;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase">Service Reminder</p>
+                    <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1;color:#FFFFFF">${escapeHtml(subjectPrefix)}: ${escapeHtml(serviceName)}</h1>
+                    <p style="margin:0;color:#CBD5E1;font-size:15px;line-height:1.7">
+                      Hi ${escapeHtml(memberName || 'there')}, just a reminder that <strong style="color:#FFFFFF">${escapeHtml(serviceName)}</strong> is coming up <strong style="color:#FCD34D">${escapeHtml(dayLabel)}</strong>.
+                    </p>
+                  </div>
+                  <div style="padding:0 32px 32px">
+                    <div style="margin:18px 0 24px;padding:18px 20px;border:1px solid #1E293B;border-radius:20px;background:#020617">
+                      <p style="margin:0 0 6px;color:#94A3B8;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase">Details</p>
+                      <p style="margin:0 0 10px;color:#F8FAFC;font-size:20px;font-weight:700">${escapeHtml(serviceName)}</p>
+                      <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">When:</strong> ${escapeHtml(schedule)}</p>
+                      ${roles.length > 0 ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Your role:</strong> ${escapeHtml(roles.join(', '))}</p>` : ''}
+                      ${songsLine}
+                      ${org.city ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Location:</strong> ${escapeHtml(org.city)}</p>` : ''}
+                    </div>
+                    <div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)">
+                      <p style="margin:0 0 8px;color:#E2E8F0;font-size:14px;font-weight:700">Please make sure you:</p>
+                      <ul style="margin:0;padding-left:20px;color:#94A3B8;font-size:13px;line-height:2">
+                        <li>Have all the songs covered / learned</li>
+                        <li>Reviewed your part and any notes from the team</li>
+                        <li>Confirmed your availability in <strong style="color:#A5B4FC">Ultimate Playback → Assignments</strong></li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>`;
+            const textBody = [
+              `Reminder: ${serviceName} is ${dayLabel}.`,
+              `When: ${schedule}`,
+              roles.length > 0 ? `Your role: ${roles.join(', ')}` : '',
+              songsText,
+              '',
+              'Please make sure you:',
+              '• Have all the songs covered / learned',
+              '• Reviewed your part and any notes from the team',
+              '• Confirmed your availability in Ultimate Playback → Assignments',
+            ].filter(s => s !== undefined).join('\n');
+
+            const emailRes = await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendApiKey}` },
+              body: JSON.stringify({
+                from: `${fromName} <${fromEmail}>`,
+                to: [memberEmail],
+                subject: `${subjectPrefix}: ${serviceName} — ${orgName}`,
+                html: htmlBody,
+                text: textBody,
+              }),
+            });
+            if (emailRes.ok) emailSent++;
+            else { emailFailed++; console.log('[reminders] email failed', memberEmail, await emailRes.text()); }
+          } catch (err) {
+            emailFailed++;
+            console.log('[reminders] email error', memberEmail, err?.message || String(err));
+          }
+        }
+
+        // ── 2. In-app message (direct to member) ───────────────────────────
+        try {
+          const msgs = await kvGet(env, orgKey(orgId, 'messages'), []);
+          const dayLabel2 = diffDays === 1 ? 'tomorrow' : 'in 3 days';
+          msgs.unshift({
+            id: makeId(),
+            fromEmail: 'system@ultimatelabs.co',
+            fromName: org.name || 'Ultimate Musician',
+            subject: `Reminder: ${serviceName} is ${dayLabel2}`,
+            message: `Hi ${memberName || 'there'}, just a reminder that ${serviceName} is ${dayLabel2}.\n\n` +
+              (songs.length > 0 ? `Songs on the plan: ${songs.join(', ')}.\n\n` : '') +
+              `Please make sure you have your songs covered and your availability confirmed in the Assignments screen.`,
+            to: memberEmail,
+            timestamp: new Date().toISOString(),
+            read: false,
+            replies: [],
+            hiddenFor: [],
+            visibility: 'conversation',
+            messageType: 'reminder',
+            isSystemMsg: false,
+            serviceId: service.id,
+          });
+          await kvPut(env, orgKey(orgId, 'messages'), msgs);
+          msgCreated++;
+        } catch (err) {
+          console.log('[reminders] in-app message error', memberEmail, err?.message || String(err));
+        }
+
+        // ── 3. Push notification ────────────────────────────────────────────
+        try {
+          const targets = filterPushDevices(pushDevices, { emails: [memberEmail], preferenceKey: 'messages' });
+          if (targets.length > 0) {
+            await sendPushToDevices(targets, {
+              title: `${diffDays === 1 ? '⚠️ Tomorrow' : '📅 In 3 days'}: ${serviceName}`,
+              body: `Make sure your songs are covered. Open Ultimate Playback for details.`,
+              data: { type: 'reminder', screen: 'AssignmentsTab', serviceId: service.id },
+            }, 'messages');
+            pushSent += targets.length;
+          }
+        } catch (err) {
+          console.log('[reminders] push error', memberEmail, err?.message || String(err));
+        }
+
+        newlySent[dupKey] = new Date().toISOString();
+      }
+    }
+
+    // Persist dedup log
+    const merged = { ...remindersSent, ...newlySent };
+    // Prune entries older than 8 days to keep KV tidy
+    const cutoff = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    for (const k of Object.keys(merged)) {
+      if (merged[k] < cutoff) delete merged[k];
+    }
+    await kvPut(env, sentKey, merged);
+
+    return json({ ok: true, emailSent, emailFailed, msgCreated, pushSent, newReminders: Object.keys(newlySent).length });
+  }
+
+  // ── POST /sync/ai/recommend — Workers AI song recommendations ────────────
+  if (route === 'ai/recommend' && method === 'POST') {
+    if (!env.AI) return json({ error: 'AI features are not configured for this environment.' }, 503);
+    const body = await request.json().catch(() => ({}));
+    const { currentSong = {}, setlistContext = [] } = body;
+
+    const currentTitle = clipText(String(currentSong.title || 'Unknown'), 80);
+    const currentKey   = clipText(String(currentSong.key   || 'Unknown'), 12);
+    const currentBpm   = Number.isFinite(Number(currentSong.bpm)) ? Number(currentSong.bpm) : null;
+    const contextLines = Array.isArray(setlistContext)
+      ? setlistContext.slice(0, 8).map((s, i) =>
+          `${i + 1}. "${clipText(String(s?.title || ''), 60)}" (Key: ${clipText(String(s?.key || '?'), 12)}, BPM: ${s?.bpm || '?'})`)
+      : [];
+
+    const systemPrompt = 'You are a worship music director assistant. Recommend 3 worship songs that flow well after the given song. Consider key compatibility, energy arc, and typical setlist flow. Respond with a JSON object exactly like: {"recommendations": [{"title": "...", "artist": "...", "reason": "...", "suggestedKey": "..."}]}. Use only valid JSON. No markdown. No extra text.';
+    const userPrompt = [
+      `Current song: "${currentTitle}" — Key: ${currentKey}${currentBpm ? `, BPM: ${currentBpm}` : ''}.`,
+      contextLines.length > 0 ? `Setlist so far:\n${contextLines.join('\n')}` : 'This is the first song on the setlist.',
+      'What 3 songs would flow well next?',
+    ].join('\n');
+
+    let recommendations = [];
+    try {
+      const aiResult = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        max_tokens: 512,
+        temperature: 0.7,
+      });
+      const rawResponse = aiResult?.response || aiResult?.result?.response || '';
+      const jsonMatch = rawResponse.match(/\{[\s\S]*"recommendations"[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (Array.isArray(parsed.recommendations)) {
+          recommendations = parsed.recommendations.slice(0, 3).map(r => ({
+            title: clipText(String(r.title || ''), 120),
+            artist: clipText(String(r.artist || ''), 120),
+            reason: clipText(String(r.reason || ''), 300),
+            suggestedKey: clipText(String(r.suggestedKey || currentKey), 12),
+          }));
+        }
+      }
+    } catch (err) {
+      console.log('[ai/recommend] error:', err?.message || String(err));
+      return json({ error: 'AI recommendation failed. Please try again.' }, 502);
+    }
+
+    trackEvent(env, orgId, 'ai_call', { endpoint: 'recommend', currentSong: currentTitle, resultCount: recommendations.length });
+    return json({ ok: true, recommendations, currentSong: { title: currentTitle, key: currentKey, bpm: currentBpm } });
+  }
+
+  // ── GET /sync/ai/stats — D1 analytics summary for the org ─────────────
+  if (route === 'ai/stats' && method === 'GET') {
+    if (!env.UM_DB) return json({ error: 'Analytics database not configured.' }, 503);
+    try {
+      const [eventCounts, recentActivity] = await Promise.all([
+        env.UM_DB.prepare(
+          `SELECT event, COUNT(*) as count FROM analytics_events WHERE orgId = ? GROUP BY event ORDER BY count DESC LIMIT 20`
+        ).bind(orgId).all(),
+        env.UM_DB.prepare(
+          `SELECT event, metadata, ts FROM analytics_events WHERE orgId = ? ORDER BY ts DESC LIMIT 50`
+        ).bind(orgId).all(),
+      ]);
+      return json({ ok: true, eventCounts: eventCounts.results, recentActivity: recentActivity.results });
+    } catch (err) {
+      return json({ error: 'Stats query failed', detail: err?.message }, 500);
+    }
+  }
+
+  // ── GET /sync/room/:serviceId/ws — WebSocket proxy to SyncRoom DO ────────
+  if (route.startsWith('room/') && route.endsWith('/ws') && method === 'GET') {
+    if (!env.SYNC_ROOM_WORKER) return json({ error: 'Real-time sync is not configured.' }, 503);
+    const serviceId = route.split('/')[1];
+    if (!serviceId) return json({ error: 'serviceId required' }, 400);
+    const workerUrl = new URL(request.url);
+    workerUrl.pathname = `/room/${encodeURIComponent(serviceId)}/ws`;
+    // Pass verified orgId so clients can't spoof it
+    workerUrl.searchParams.set('orgId', orgId);
+    return env.SYNC_ROOM_WORKER.fetch(new Request(workerUrl.toString(), request));
+  }
+
+  // ── GET /sync/room/:serviceId/state — last known position (REST fallback) ─
+  if (route.startsWith('room/') && route.endsWith('/state') && method === 'GET') {
+    if (!env.SYNC_ROOM_WORKER) return json({ error: 'Real-time sync is not configured.' }, 503);
+    const serviceId = route.split('/')[1];
+    if (!serviceId) return json({ error: 'serviceId required' }, 400);
+    return env.SYNC_ROOM_WORKER.fetch(
+      new Request(`https://internal/room/${encodeURIComponent(serviceId)}/state`, { method: 'GET' })
+    );
+  }
+
+  // ── POST /sync/room/:serviceId/broadcast — server-side broadcast to room ─
+  if (route.startsWith('room/') && route.endsWith('/broadcast') && method === 'POST') {
+    if (!env.SYNC_ROOM_WORKER) return json({ error: 'Real-time sync is not configured.' }, 503);
+    const serviceId = route.split('/')[1];
+    if (!serviceId) return json({ error: 'serviceId required' }, 400);
+    const body = await request.json().catch(() => ({}));
+    return env.SYNC_ROOM_WORKER.fetch(
+      new Request(`https://internal/room/${encodeURIComponent(serviceId)}/broadcast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    );
   }
 
   return json({ error: 'Not found', route }, 404);

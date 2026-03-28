@@ -1,27 +1,46 @@
 name = "ultimatelabs"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-09-23"
 pages_build_output_dir = "dist"
 
-# ── Cloudflare KV — persistent sync storage ─────────────────────────────────
-# Setup steps (run once in this folder):
-#   1. wrangler login
-#   2. wrangler kv:namespace create STORE
-#      → copy the returned `id` below
-#   3. wrangler kv:namespace create STORE --preview
-#      → copy the returned `id` as `preview_id` below
-#   4. git push  (Cloudflare Pages auto-deploys)
+# ── Cloudflare KV — persistent sync storage ──────────────────────────────
 [[kv_namespaces]]
 binding = "STORE"
 id = "abcb5dd163db4387bb6d4c704755492c"
 preview_id = "0739ae84eb0241ff9cf652b9deb9fd40"
 
-# ── Queue producer: dispatches stem jobs to CineStage Container ──────────────
+# ── Queue producer: stem jobs ─────────────────────────────────────────────
 [[queues.producers]]
 binding = "STEM_QUEUE"
 queue = "stem-jobs"
 
-# ── R2 bucket: source audio uploads + processed stems ───────────────────────
+# ── R2 bucket: audio uploads + processed stems ────────────────────────────
 [[r2_buckets]]
 binding = "STEMS_R2"
 bucket_name = "cinestage-stems"
 preview_bucket_name = "cinestage-stems"
+
+# ── D1 Database — structured queries alongside KV ─────────────────────────
+[[d1_databases]]
+binding = "UM_DB"
+database_name = "UM_DB"
+database_id = "4a9e5a7f-998e-4526-bf71-20b0da4fa7da"
+
+# ── Workers AI — song recommendations + analysis ──────────────────────────
+[ai]
+binding = "AI"
+
+# ── Analytics Engine — usage tracking ────────────────────────────────────
+[[analytics_engine_datasets]]
+binding = "UM_ANALYTICS"
+dataset = "um_events"
+
+# ── Service binding → Real-Time Sync Worker (Durable Objects) ────────────
+[[services]]
+binding = "SYNC_ROOM_WORKER"
+service = "um-sync-room"
+
+# ── Secrets (set via `wrangler pages secret put <KEY>`) ──────────────────
+# TURNSTILE_SECRET   — Cloudflare Turnstile secret key
+# CRON_SECRET        — shared secret for cron endpoints
+# RESEND_API_KEY     — transactional email (already set)
+# FROM_EMAIL / ASSIGNMENT_FROM_EMAIL — sender address
