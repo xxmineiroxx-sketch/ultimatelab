@@ -1,11 +1,12 @@
 'use client'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 const PORTAL_API_BASE = '/portal-api'
 const DEVICE_KEY = '@um_portal_device_id'
 async function api(path: string, opts: RequestInit = {}) {
   const headers = new Headers(opts.headers as HeadersInit | undefined)
   if (opts.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  headers.set('x-requested-by', 'web-portal')
   const r = await fetch(`${PORTAL_API_BASE}/${path}`, {
     ...opts,
     credentials: 'same-origin',
@@ -185,21 +186,59 @@ function Btn({ children, onClick, variant='primary', small, disabled }: { childr
 // LOGIN
 // ══════════════════════════════════════════════════════════════════════════════
 function LoginScreen({ onLogin }: { onLogin:(s:Session)=>void }) {
-  const [tab,setTab]     = useState<'login'|'register'>('login')
-  const [ident,setIdent] = useState('')
-  const [pass,setPass]   = useState('')
-  const [name,setName]   = useState('')
-  const [code,setCode]   = useState('')
-  const [err,setErr]     = useState('')
-  const [note,setNote]   = useState('')
-  const [busy,setBusy]   = useState(false)
+  const [tab,setTab]       = useState<'login'|'register'>('login')
+  const [ident,setIdent]   = useState('')
+  const [pass,setPass]     = useState('')
+  const [name,setName]     = useState('')
+  const [code,setCode]     = useState('')
+  const [err,setErr]       = useState('')
+  const [note,setNote]     = useState('')
+  const [busy,setBusy]     = useState(false)
+  const [tsToken,setTsToken] = useState('')
+  const tsContainerRef     = useRef<HTMLDivElement>(null)
+  const tsWidgetId         = useRef<string|null>(null)
   const [verify,setVerify] = useState<{ identifier: string; purpose: 'signup'|'login'; email: string }|null>(null)
+
+  // Load Cloudflare Turnstile widget when form is visible
+  useEffect(() => {
+    if (verify) return // no widget needed on verify screen
+    let retries = 0
+    const tryRender = () => {
+      const w = window as any
+      if (!w.turnstile || !tsContainerRef.current) {
+        if (retries++ < 20) setTimeout(tryRender, 300)
+        return
+      }
+      if (tsWidgetId.current) {
+        try { w.turnstile.remove(tsWidgetId.current) } catch {}
+        tsWidgetId.current = null
+      }
+      tsWidgetId.current = w.turnstile.render(tsContainerRef.current, {
+        sitekey: process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '1x00000000000000000000AA',
+        callback: (t: string) => setTsToken(t),
+        'expired-callback': () => setTsToken(''),
+        'error-callback': () => setTsToken(''),
+        theme: 'dark',
+        size: 'normal',
+      })
+    }
+    setTsToken('')
+    tryRender()
+    return () => {
+      const w = window as any
+      if (tsWidgetId.current && w.turnstile) {
+        try { w.turnstile.remove(tsWidgetId.current) } catch {}
+        tsWidgetId.current = null
+      }
+    }
+  }, [tab, verify])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setErr(''); setNote(''); setBusy(true)
     try {
       const body: Record<string,string> = { identifier:ident.trim(), password:pass, deviceId:getPortalDeviceId() }
       if (tab==='register') body.name = name.trim()
+      if (tsToken) body.turnstileToken = tsToken
       const data = await api(`auth/${tab}`, { method:'POST', body:JSON.stringify(body) })
       if (!data.ok) { setErr(data.error||'Something went wrong'); return }
       if (data.needsVerification) {
@@ -263,6 +302,8 @@ function LoginScreen({ onLogin }: { onLogin:(s:Session)=>void }) {
 
   return (
     <div className="min-h-screen bg-[#020617] flex flex-col items-center justify-center p-6">
+      {/* Cloudflare Turnstile script */}
+      <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer />
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="text-6xl mb-3">🎵</div>
@@ -311,6 +352,8 @@ function LoginScreen({ onLogin }: { onLogin:(s:Session)=>void }) {
                 {tab==='register' && <FInput label="Full Name" value={name} onChange={e=>setName(e.target.value)} placeholder="Your name" />}
                 <FInput label="Email or Phone" value={ident} onChange={e=>setIdent(e.target.value)} placeholder="you@example.com" />
                 <FInput label="Password" value={pass} onChange={e=>setPass(e.target.value)} placeholder="••••••••" type="password" />
+                {/* Cloudflare Turnstile widget */}
+                <div ref={tsContainerRef} className="flex justify-center my-1" />
                 {note && <p className="text-xs px-3 py-2 rounded-lg bg-green-900/30 text-green-400">{note}</p>}
                 {err && <p className="text-xs px-3 py-2 rounded-lg bg-red-900/30 text-red-400">{err}</p>}
                 <button type="submit" disabled={busy} className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold py-3 rounded-xl transition-colors">

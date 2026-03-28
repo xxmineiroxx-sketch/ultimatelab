@@ -456,6 +456,27 @@ async function verifyTurnstile(env, token, ip = '') {
   }
 }
 
+// ── Rate Limiting ─────────────────────────────────────────────────────────
+// KV-based sliding window counter. Fails open on KV error.
+// key:    e.g. 'login' or 'register' — combined with IP + time window
+// max:    max attempts allowed in the window
+// windowSeconds: window size in seconds
+async function checkRateLimit(env, ip, key, max, windowSeconds) {
+  if (!env.STORE || !ip) return { limited: false };
+  const window = Math.floor(Date.now() / (windowSeconds * 1000));
+  const rlKey = `rl:${key}:${ip.replace(/:/g, '_')}:${window}`;
+  try {
+    const current = parseInt((await env.STORE.get(rlKey)) || '0', 10);
+    if (current >= max) {
+      return { limited: true, retryAfter: windowSeconds };
+    }
+    env.STORE.put(rlKey, String(current + 1), { expirationTtl: windowSeconds + 60 }).catch(() => {});
+    return { limited: false };
+  } catch {
+    return { limited: false }; // fail open
+  }
+}
+
 // ── D1 Write-Through Helpers ──────────────────────────────────────────────
 // All writes are fire-and-forget so they never block KV latency.
 function _d1Run(env, stmt) {
@@ -539,6 +560,15 @@ function d1InsertMessage(env, orgId, msg) {
     msg.message||msg.body||'', msg.read?1:0,
     msg.messageType||'general', msg.serviceId||null,
     msg.timestamp||msg.createdAt||new Date().toISOString()));
+}
+
+function d1InsertReminderSent(env, orgId, serviceId, daysOut, memberEmail) {
+  if (!orgId || !serviceId || !memberEmail) return;
+  _d1Run(env, env.UM_DB?.prepare(
+    `INSERT OR IGNORE INTO reminder_sent (orgId, serviceId, daysOut, memberEmail, sentAt)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(orgId, serviceId, daysOut, normalizeLower(memberEmail),
+    new Date().toISOString()));
 }
 
 function pickDefinedStemFields(value = {}) {
@@ -3152,6 +3182,7 @@ export async function onRequest(context) {
             } catch (e) { console.log('[cron/reminders] push err', oid, e?.message); }
 
             newlySent[dupKey] = new Date().toISOString();
+            d1InsertReminderSent(env, oid, service.id, diffDays, memberEmail); // D1 dedup write
           }
         }
 
@@ -3271,6 +3302,25 @@ export async function onRequest(context) {
       key,
       fileUrl: stemObjectPublicUrl(url.origin, key),
     });
+  }
+
+  // ── GET /sync/songs/search?q=...&limit=20 — server-side song search ─────
+  // Returns songs whose title or artist contain the query string.
+  if (route === 'songs/search' && method === 'GET') {
+    const q = (url.searchParams.get('q') || '').toLowerCase().trim();
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 100);
+    if (!q) return json({ ok: true, songs: [] });
+    const songMap = await kvGet(env, orgKey(orgId, 'songLibrary'), {});
+    const results = Object.values(songMap)
+      .filter(s => {
+        const title  = (s.title  || '').toLowerCase();
+        const artist = (s.artist || '').toLowerCase();
+        const tags   = (s.tags   || '').toLowerCase();
+        return title.includes(q) || artist.includes(q) || tags.includes(q);
+      })
+      .slice(0, limit)
+      .map(s => ({ id: s.id, title: s.title, artist: s.artist, key: s.key, bpm: s.bpm, tags: s.tags }));
+    return json({ ok: true, songs: results, total: results.length });
   }
 
   // ── GET /sync/library-pull ───────────────────────────────────────────────
@@ -4029,6 +4079,19 @@ export async function onRequest(context) {
     });
     trackEvent(env, orgId, 'assignment_respond', { serviceId, status, role });
 
+    // Push notification to admin(s) about the response
+    const pushEmoji = status === 'accepted' ? '✅' : status === 'declined' ? '❌' : 'ℹ️';
+    const pushDevicesForRespond = await getPushDevices(env, orgId).catch(() => []);
+    const adminTargets = filterPushDevices(pushDevicesForRespond, { adminOnly: true, preferenceKey: 'assignments' });
+    if (adminTargets.length > 0) {
+      const displayName2 = resolvedName || personName;
+      sendPushToDevices(adminTargets, {
+        title: `${pushEmoji} ${displayName2} ${status} assignment`,
+        body: `"${serviceName}"${serviceDate ? ' on ' + serviceDate : ''}`,
+        data: { type: 'assignment_response', screen: 'ServicePlanTab', serviceId, status },
+      }, 'assignments').catch(() => {});
+    }
+
     return json({ ok: true });
   }
 
@@ -4494,8 +4557,19 @@ export async function onRequest(context) {
   if (route === 'auth/register' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
     const cfIp = request.headers.get('CF-Connecting-IP') || '';
-    const tsResult = await verifyTurnstile(env, body.turnstileToken || '', cfIp);
-    if (!tsResult.success) return json({ error: tsResult.error }, 403);
+    // Rate limit: 5 register attempts per IP per 10 minutes
+    const rlReg = await checkRateLimit(env, cfIp, 'register', 5, 600);
+    if (rlReg.limited) {
+      return new Response(JSON.stringify({ error: 'Too many attempts. Please wait a few minutes before trying again.' }), {
+        status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': String(rlReg.retryAfter), ...CORS_HEADERS },
+      });
+    }
+    // Only enforce Turnstile for web portal requests (mobile app skips Turnstile)
+    const isWebPortal = request.headers.get('x-requested-by') === 'web-portal';
+    if (isWebPortal) {
+      const tsResult = await verifyTurnstile(env, body.turnstileToken || '', cfIp);
+      if (!tsResult.success) return json({ error: tsResult.error }, 403);
+    }
     const raw = (body.identifier || body.email || '').trim();
     const { password = '', name = '' } = body;
     if (!raw || !password) return json({ error: 'identifier and password required' }, 400);
@@ -4561,8 +4635,19 @@ export async function onRequest(context) {
   if (route === 'auth/login' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
     const cfIp = request.headers.get('CF-Connecting-IP') || '';
-    const tsResult = await verifyTurnstile(env, body.turnstileToken || '', cfIp);
-    if (!tsResult.success) return json({ error: tsResult.error }, 403);
+    // Rate limit: 10 login attempts per IP per 5 minutes
+    const rlLogin = await checkRateLimit(env, cfIp, 'login', 10, 300);
+    if (rlLogin.limited) {
+      return new Response(JSON.stringify({ error: 'Too many sign-in attempts. Please wait a few minutes.' }), {
+        status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': String(rlLogin.retryAfter), ...CORS_HEADERS },
+      });
+    }
+    // Only enforce Turnstile for web portal requests
+    const isWebPortalLogin = request.headers.get('x-requested-by') === 'web-portal';
+    if (isWebPortalLogin) {
+      const tsResult = await verifyTurnstile(env, body.turnstileToken || '', cfIp);
+      if (!tsResult.success) return json({ error: tsResult.error }, 403);
+    }
     const raw = (body.identifier || body.email || '').trim();
     const { password = '' } = body;
     if (!raw || !password) return json({ error: 'identifier and password required' }, 400);
@@ -6071,6 +6156,7 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
         }
 
         newlySent[dupKey] = new Date().toISOString();
+        d1InsertReminderSent(env, orgId, service.id, diffDays, memberEmail); // D1 dedup write
       }
     }
 
