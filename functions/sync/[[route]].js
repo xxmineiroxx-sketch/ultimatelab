@@ -2073,6 +2073,7 @@ async function ensureBirthdayMessages(env, orgId, org) {
         hiddenFor: [],
         visibility: 'conversation',
         messageType: 'birthday_greeting',
+        audience: 'member',
         messageKey: userMessageKey,
         birthdayDate: today.dateKey,
       });
@@ -2192,6 +2193,126 @@ function buildServiceScheduleLabel(dateValue, timeValue) {
   const timeLabel = formatDisplayServiceTime(timeValue);
   if (dateLabel && timeLabel) return `${dateLabel} at ${timeLabel}`;
   return dateLabel || timeLabel || 'Date and time to be confirmed';
+}
+
+function buildServiceReminderContent({
+  service = {},
+  orgName = 'Your Church',
+  memberName = '',
+  roles = [],
+  songs = [],
+  diffDays = 1,
+}) {
+  const serviceName = String(service?.name || service?.title || 'Service').trim() || 'Service';
+  const normalizedOrgName = String(orgName || 'Your Church').trim() || 'Your Church';
+  const dayLabel = diffDays === 1 ? 'tomorrow' : 'in 3 days';
+  const subjectPrefix = diffDays === 1 ? 'Reminder for tomorrow' : 'Reminder for this week';
+  const serviceDate = String(service?.date || service?.serviceDate || '').trim();
+  const serviceTime = String(service?.time || service?.startTime || '').trim();
+  const rehearsalTime = String(
+    service?.rehearsalTime
+    || service?.callTime
+    || service?.arrivalTime
+    || service?.soundcheckTime
+    || '',
+  ).trim();
+  const scheduleLabel = buildServiceScheduleLabel(serviceDate, serviceTime);
+  const rehearsalLabel = formatDisplayServiceTime(rehearsalTime);
+  const locationLabel = String(
+    service?.location
+    || service?.campus
+    || service?.venue
+    || service?.city
+    || '',
+  ).trim();
+  const songsLabel = Array.isArray(songs) && songs.length > 0
+    ? songs.join(', ')
+    : '';
+  const roleLabel = roles.length === 1 ? 'Role' : 'Roles';
+  const greetingName = String(memberName || '').trim() || 'there';
+  const rehearsalText = rehearsalLabel
+    ? `Rehearsal / call time: ${rehearsalLabel}.`
+    : 'Rehearsal / call time: follow the normal team schedule unless your worship leader shares a change.';
+  const textBody = [
+    `Hi ${greetingName},`,
+    '',
+    `${serviceName} at ${normalizedOrgName} is ${dayLabel}.`,
+    `When: ${scheduleLabel}`,
+    roles.length > 0 ? `${roleLabel}: ${roles.join(', ')}` : '',
+    rehearsalText,
+    locationLabel ? `Location: ${locationLabel}` : '',
+    songsLabel ? `Songs: ${songsLabel}` : 'Songs: Please review the current service plan in Ultimate Playback.',
+    '',
+    'Please make sure you:',
+    '• Have the right songs and arrangements ready',
+    '• Review your part before the service',
+    '• Confirm your availability in Ultimate Playback → Assignments',
+    '• Be there on time',
+    '',
+    diffDays === 1 ? 'See you tomorrow.' : 'See you soon.',
+  ].filter(Boolean).join('\n');
+
+  const htmlBody = `
+    <div style="background:#020617;padding:32px 20px;font-family:Arial,sans-serif;color:#F8FAFC">
+      <div style="max-width:560px;margin:0 auto;background:linear-gradient(180deg,#0B1120 0%,#0F172A 100%);border:1px solid #1F2937;border-radius:28px;overflow:hidden;box-shadow:0 20px 60px rgba(2,6,23,0.45)">
+        <div style="padding:32px 32px 18px;background:radial-gradient(circle at top left,rgba(99,102,241,0.22),transparent 55%),radial-gradient(circle at top right,rgba(245,158,11,0.12),transparent 40%)">
+          <p style="margin:0 0 10px;color:#FCD34D;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase">Service Reminder</p>
+          <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1;color:#FFFFFF">${escapeHtml(serviceName)} is ${escapeHtml(dayLabel)}</h1>
+          <p style="margin:0;color:#CBD5E1;font-size:15px;line-height:1.7">
+            Hi ${escapeHtml(greetingName)}, this is a reminder from <strong style="color:#FFFFFF">${escapeHtml(normalizedOrgName)}</strong>.
+          </p>
+        </div>
+        <div style="padding:0 32px 32px">
+          <div style="margin:18px 0 24px;padding:18px 20px;border:1px solid #1E293B;border-radius:20px;background:#020617">
+            <p style="margin:0 0 6px;color:#94A3B8;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase">Service Details</p>
+            <p style="margin:0 0 10px;color:#F8FAFC;font-size:20px;font-weight:700">${escapeHtml(serviceName)}</p>
+            <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">When:</strong> ${escapeHtml(scheduleLabel)}</p>
+            ${roles.length > 0 ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">${escapeHtml(roleLabel)}:</strong> ${escapeHtml(roles.join(', '))}</p>` : ''}
+            <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Rehearsal / call:</strong> ${rehearsalLabel ? escapeHtml(rehearsalLabel) : 'Follow the schedule shared by your worship leader unless it changes.'}</p>
+            ${locationLabel ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Location:</strong> ${escapeHtml(locationLabel)}</p>` : ''}
+            <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Songs:</strong> ${songsLabel ? escapeHtml(songsLabel) : 'Please review the current service plan in Ultimate Playback.'}</p>
+          </div>
+          <div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)">
+            <p style="margin:0 0 8px;color:#E2E8F0;font-size:14px;font-weight:700">Please make sure you:</p>
+            <ul style="margin:0;padding-left:20px;color:#94A3B8;font-size:13px;line-height:2">
+              <li>Have the right songs and arrangements ready</li>
+              <li>Review your part before the service</li>
+              <li>Confirm your availability in <strong style="color:#A5B4FC">Ultimate Playback → Assignments</strong></li>
+              <li>Be there on time</li>
+            </ul>
+            <p style="margin:12px 0 0;color:#E2E8F0;font-size:13px;line-height:1.8">${diffDays === 1 ? 'See you tomorrow.' : 'See you soon.'}</p>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  return {
+    dayLabel,
+    subjectPrefix,
+    emailSubject: `${subjectPrefix}: ${serviceName} — ${normalizedOrgName}`,
+    htmlBody,
+    textBody,
+    inAppSubject: `Reminder: ${serviceName} is ${dayLabel}`,
+    inAppMessage: [
+      `Hi ${greetingName}, ${serviceName} at ${normalizedOrgName} is ${dayLabel}.`,
+      `When: ${scheduleLabel}`,
+      roles.length > 0 ? `${roleLabel}: ${roles.join(', ')}` : '',
+      rehearsalText,
+      locationLabel ? `Location: ${locationLabel}` : '',
+      songsLabel ? `Songs: ${songsLabel}` : 'Songs: Please review the current service plan in Ultimate Playback.',
+      '',
+      'Please make sure you have the right songs, review your part, confirm your availability, and be there on time.',
+      diffDays === 1 ? 'See you tomorrow.' : 'See you soon.',
+    ].filter(Boolean).join('\n'),
+    pushTitle: `${diffDays === 1 ? 'Tomorrow' : 'This week'}: ${serviceName}`,
+    pushBody: `${scheduleLabel}. Review your songs and be ready on time.`,
+  };
+}
+
+function isMemberOnlySystemMessage(message = {}) {
+  const audience = String(message?.audience || '').trim().toLowerCase();
+  const messageType = String(message?.messageType || '').trim().toLowerCase();
+  return audience === 'member' || messageType === 'reminder' || messageType === 'birthday_greeting';
 }
 
 function buildAssignmentAppLink(serviceId, decision = '') {
@@ -3163,9 +3284,14 @@ export async function onRequest(context) {
             if (remindersSent[dupKey] || newlySent[dupKey]) continue;
 
             const roles = member.role ? [member.role] : [];
-            const dayLabel = diffDays === 1 ? 'tomorrow' : 'in 3 days';
-            const subjectPrefix = diffDays === 1 ? '⚠️ Tomorrow' : '📅 Coming up in 3 days';
-            const schedule = buildServiceScheduleLabel(serviceDate, service.time || service.startTime || '');
+            const reminderContent = buildServiceReminderContent({
+              service,
+              orgName,
+              memberName,
+              roles,
+              songs,
+              diffDays,
+            });
 
             // Email
             const resendApiKey = env.RESEND_API_KEY || '';
@@ -3173,14 +3299,16 @@ export async function onRequest(context) {
               try {
                 const fromEmail = env.ASSIGNMENT_FROM_EMAIL || env.INVITE_FROM_EMAIL || 'ultimatemusician@ultimatelabs.co';
                 const fromName = env.ASSIGNMENT_FROM_NAME || env.INVITE_FROM_NAME || 'Ultimate Musician';
-                const songsLine = songs.length > 0 ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Songs:</strong> ${escapeHtml(songs.join(', '))}</p>` : '';
-                const songsText = songs.length > 0 ? `Songs: ${songs.join(', ')}` : '';
-                const htmlBody = `<div style="background:#020617;padding:32px 20px;font-family:Arial,sans-serif;color:#F8FAFC"><div style="max-width:560px;margin:0 auto;background:linear-gradient(180deg,#0B1120 0%,#0F172A 100%);border:1px solid #1F2937;border-radius:28px;overflow:hidden"><div style="padding:32px 32px 18px"><p style="margin:0 0 10px;color:#FCD34D;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase">Service Reminder</p><h1 style="margin:0 0 12px;font-size:28px;line-height:1.1;color:#FFFFFF">${escapeHtml(subjectPrefix)}: ${escapeHtml(serviceName)}</h1><p style="margin:0;color:#CBD5E1;font-size:15px;line-height:1.7">Hi ${escapeHtml(memberName || 'there')}, <strong>${escapeHtml(serviceName)}</strong> is <strong style="color:#FCD34D">${escapeHtml(dayLabel)}</strong>.</p></div><div style="padding:0 32px 32px"><div style="margin:18px 0 24px;padding:18px 20px;border:1px solid #1E293B;border-radius:20px;background:#020617"><p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">When:</strong> ${escapeHtml(schedule)}</p>${roles.length > 0 ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Your role:</strong> ${escapeHtml(roles.join(', '))}</p>` : ''}${songsLine}</div><div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)"><p style="margin:0 0 8px;color:#E2E8F0;font-size:14px;font-weight:700">Please make sure you:</p><ul style="margin:0;padding-left:20px;color:#94A3B8;font-size:13px;line-height:2"><li>Have all songs covered / learned</li><li>Reviewed your part and notes</li><li>Confirmed availability in Ultimate Playback → Assignments</li></ul></div></div></div></div>`;
-                const textBody = [`Reminder: ${serviceName} is ${dayLabel}.`, `When: ${schedule}`, roles.length > 0 ? `Your role: ${roles.join(', ')}` : '', songsText, '', 'Please make sure you:', '• Have all songs covered / learned', '• Confirmed your availability in Ultimate Playback → Assignments'].filter(Boolean).join('\n');
                 const emailRes = await fetch('https://api.resend.com/emails', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendApiKey}` },
-                  body: JSON.stringify({ from: `${fromName} <${fromEmail}>`, to: [memberEmail], subject: `${subjectPrefix}: ${serviceName} — ${orgName}`, html: htmlBody, text: textBody }),
+                  body: JSON.stringify({
+                    from: `${fromName} <${fromEmail}>`,
+                    to: [memberEmail],
+                    subject: reminderContent.emailSubject,
+                    html: reminderContent.htmlBody,
+                    text: reminderContent.textBody,
+                  }),
                 });
                 if (emailRes.ok) emailSent++;
                 else console.log('[cron/reminders] email fail', oid, memberEmail, await emailRes.text());
@@ -3190,7 +3318,23 @@ export async function onRequest(context) {
             // In-app message
             try {
               const msgs = await kvGet(env, orgKey(oid, 'messages'), []);
-              msgs.unshift({ id: makeId(), fromEmail: 'system@ultimatelabs.co', fromName: orgName, subject: `Reminder: ${serviceName} is ${dayLabel}`, message: `Hi ${memberName || 'there'}, ${serviceName} is ${dayLabel}.\n\n${songs.length > 0 ? `Songs: ${songs.join(', ')}.\n\n` : ''}Make sure you have your songs covered and availability confirmed.`, to: memberEmail, timestamp: new Date().toISOString(), read: false, replies: [], hiddenFor: [], visibility: 'conversation', messageType: 'reminder', isSystemMsg: false, serviceId: service.id });
+              msgs.unshift({
+                id: makeId(),
+                fromEmail: 'system@ultimatelabs.co',
+                fromName: orgName,
+                subject: reminderContent.inAppSubject,
+                message: reminderContent.inAppMessage,
+                to: memberEmail,
+                timestamp: new Date().toISOString(),
+                read: false,
+                replies: [],
+                hiddenFor: [],
+                visibility: 'conversation',
+                messageType: 'reminder',
+                audience: 'member',
+                isSystemMsg: false,
+                serviceId: service.id,
+              });
               await kvPut(env, orgKey(oid, 'messages'), msgs);
               msgCreated++;
             } catch (e) { console.log('[cron/reminders] msg err', oid, e?.message); }
@@ -3199,7 +3343,11 @@ export async function onRequest(context) {
             try {
               const targets = filterPushDevices(pushDevices, { emails: [memberEmail], preferenceKey: 'messages' });
               if (targets.length > 0) {
-                await sendPushToDevices(targets, { title: `${diffDays === 1 ? '⚠️ Tomorrow' : '📅 In 3 days'}: ${serviceName}`, body: 'Make sure your songs are covered. Open Ultimate Playback for details.', data: { type: 'reminder', screen: 'AssignmentsTab', serviceId: service.id } }, 'messages');
+                await sendPushToDevices(targets, {
+                  title: reminderContent.pushTitle,
+                  body: reminderContent.pushBody,
+                  data: { type: 'reminder', screen: 'AssignmentsTab', serviceId: service.id },
+                }, 'messages');
                 pushSent += targets.length;
               }
             } catch (e) { console.log('[cron/reminders] push err', oid, e?.message); }
@@ -5308,7 +5456,11 @@ export async function onRequest(context) {
   // ── GET /sync/messages/admin — admin inbox ───────────────────────────────
   if (route === 'messages/admin' && method === 'GET') {
     const msgs = await kvGet(env, orgKey(orgId, 'messages'), []);
-    return json(msgs.sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
+    return json(
+      (Array.isArray(msgs) ? msgs : [])
+        .filter((message) => !isMemberOnlySystemMessage(message))
+        .sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+    );
   }
 
   // ── GET /sync/messages/replies — user's sent + received messages ──────────
@@ -6140,8 +6292,14 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
         if (remindersSent[dupKey] || newlySent[dupKey]) continue;
 
         const roles = member.role ? [member.role] : [];
-        const dayLabel = diffDays === 1 ? 'tomorrow' : 'in 3 days';
-        const subjectPrefix = diffDays === 1 ? '⚠️ Tomorrow' : '📅 Coming up in 3 days';
+        const reminderContent = buildServiceReminderContent({
+          service,
+          orgName,
+          memberName,
+          roles,
+          songs,
+          diffDays,
+        });
 
         // ── 1. Email ────────────────────────────────────────────────────────
         const resendApiKey = env.RESEND_API_KEY || '';
@@ -6149,62 +6307,15 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
           try {
             const fromEmail = env.ASSIGNMENT_FROM_EMAIL || env.INVITE_FROM_EMAIL || 'ultimatemusician@ultimatelabs.co';
             const fromName = env.ASSIGNMENT_FROM_NAME || env.INVITE_FROM_NAME || 'Ultimate Musician';
-            const schedule = buildServiceScheduleLabel(serviceDate, service.time || service.startTime || '');
-            const songsLine = songs.length > 0
-              ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Songs:</strong> ${escapeHtml(songs.join(', '))}</p>`
-              : '';
-            const songsText = songs.length > 0 ? `Songs: ${songs.join(', ')}` : '';
-            const htmlBody = `
-              <div style="background:#020617;padding:32px 20px;font-family:Arial,sans-serif;color:#F8FAFC">
-                <div style="max-width:560px;margin:0 auto;background:linear-gradient(180deg,#0B1120 0%,#0F172A 100%);border:1px solid #1F2937;border-radius:28px;overflow:hidden;box-shadow:0 20px 60px rgba(2,6,23,0.45)">
-                  <div style="padding:32px 32px 18px;background:radial-gradient(circle at top left,rgba(99,102,241,0.22),transparent 55%),radial-gradient(circle at top right,rgba(245,158,11,0.12),transparent 40%)">
-                    <p style="margin:0 0 10px;color:#FCD34D;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase">Service Reminder</p>
-                    <h1 style="margin:0 0 12px;font-size:28px;line-height:1.1;color:#FFFFFF">${escapeHtml(subjectPrefix)}: ${escapeHtml(serviceName)}</h1>
-                    <p style="margin:0;color:#CBD5E1;font-size:15px;line-height:1.7">
-                      Hi ${escapeHtml(memberName || 'there')}, just a reminder that <strong style="color:#FFFFFF">${escapeHtml(serviceName)}</strong> is coming up <strong style="color:#FCD34D">${escapeHtml(dayLabel)}</strong>.
-                    </p>
-                  </div>
-                  <div style="padding:0 32px 32px">
-                    <div style="margin:18px 0 24px;padding:18px 20px;border:1px solid #1E293B;border-radius:20px;background:#020617">
-                      <p style="margin:0 0 6px;color:#94A3B8;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase">Details</p>
-                      <p style="margin:0 0 10px;color:#F8FAFC;font-size:20px;font-weight:700">${escapeHtml(serviceName)}</p>
-                      <p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">When:</strong> ${escapeHtml(schedule)}</p>
-                      ${roles.length > 0 ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Your role:</strong> ${escapeHtml(roles.join(', '))}</p>` : ''}
-                      ${songsLine}
-                      ${org.city ? `<p style="margin:0;color:#CBD5E1;font-size:14px;line-height:1.7"><strong style="color:#FFFFFF">Location:</strong> ${escapeHtml(org.city)}</p>` : ''}
-                    </div>
-                    <div style="padding:18px 20px;border:1px solid #1F2937;border-radius:18px;background:rgba(15,23,42,0.88)">
-                      <p style="margin:0 0 8px;color:#E2E8F0;font-size:14px;font-weight:700">Please make sure you:</p>
-                      <ul style="margin:0;padding-left:20px;color:#94A3B8;font-size:13px;line-height:2">
-                        <li>Have all the songs covered / learned</li>
-                        <li>Reviewed your part and any notes from the team</li>
-                        <li>Confirmed your availability in <strong style="color:#A5B4FC">Ultimate Playback → Assignments</strong></li>
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              </div>`;
-            const textBody = [
-              `Reminder: ${serviceName} is ${dayLabel}.`,
-              `When: ${schedule}`,
-              roles.length > 0 ? `Your role: ${roles.join(', ')}` : '',
-              songsText,
-              '',
-              'Please make sure you:',
-              '• Have all the songs covered / learned',
-              '• Reviewed your part and any notes from the team',
-              '• Confirmed your availability in Ultimate Playback → Assignments',
-            ].filter(s => s !== undefined).join('\n');
-
             const emailRes = await fetch('https://api.resend.com/emails', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendApiKey}` },
               body: JSON.stringify({
                 from: `${fromName} <${fromEmail}>`,
                 to: [memberEmail],
-                subject: `${subjectPrefix}: ${serviceName} — ${orgName}`,
-                html: htmlBody,
-                text: textBody,
+                subject: reminderContent.emailSubject,
+                html: reminderContent.htmlBody,
+                text: reminderContent.textBody,
               }),
             });
             if (emailRes.ok) emailSent++;
@@ -6218,15 +6329,12 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
         // ── 2. In-app message (direct to member) ───────────────────────────
         try {
           const msgs = await kvGet(env, orgKey(orgId, 'messages'), []);
-          const dayLabel2 = diffDays === 1 ? 'tomorrow' : 'in 3 days';
           msgs.unshift({
             id: makeId(),
             fromEmail: 'system@ultimatelabs.co',
             fromName: org.name || 'Ultimate Musician',
-            subject: `Reminder: ${serviceName} is ${dayLabel2}`,
-            message: `Hi ${memberName || 'there'}, just a reminder that ${serviceName} is ${dayLabel2}.\n\n` +
-              (songs.length > 0 ? `Songs on the plan: ${songs.join(', ')}.\n\n` : '') +
-              `Please make sure you have your songs covered and your availability confirmed in the Assignments screen.`,
+            subject: reminderContent.inAppSubject,
+            message: reminderContent.inAppMessage,
             to: memberEmail,
             timestamp: new Date().toISOString(),
             read: false,
@@ -6234,6 +6342,7 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
             hiddenFor: [],
             visibility: 'conversation',
             messageType: 'reminder',
+            audience: 'member',
             isSystemMsg: false,
             serviceId: service.id,
           });
@@ -6248,8 +6357,8 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
           const targets = filterPushDevices(pushDevices, { emails: [memberEmail], preferenceKey: 'messages' });
           if (targets.length > 0) {
             await sendPushToDevices(targets, {
-              title: `${diffDays === 1 ? '⚠️ Tomorrow' : '📅 In 3 days'}: ${serviceName}`,
-              body: `Make sure your songs are covered. Open Ultimate Playback for details.`,
+              title: reminderContent.pushTitle,
+              body: reminderContent.pushBody,
               data: { type: 'reminder', screen: 'AssignmentsTab', serviceId: service.id },
             }, 'messages');
             pushSent += targets.length;
