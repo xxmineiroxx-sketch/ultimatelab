@@ -1282,7 +1282,7 @@ async function sendPushToDevices(devices, {
       targetEmail: device.email || '',
     },
     priority: 'high',
-    channelId: 'default',
+    channelId: preferenceKey || 'default',
   }));
 
   await sendExpoPushMessages(payloads);
