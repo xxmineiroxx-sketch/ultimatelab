@@ -39,6 +39,11 @@ dataset = "um_events"
 binding = "SYNC_ROOM_WORKER"
 service = "um-sync-room"
 
+# ── Vectorize — semantic song search ─────────────────────────────────────
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "um-songs-index"
+
 # ── Secrets (set via `wrangler pages secret put <KEY>`) ──────────────────
 # TURNSTILE_SECRET   — Cloudflare Turnstile secret key
 # CRON_SECRET        — shared secret for cron endpoints

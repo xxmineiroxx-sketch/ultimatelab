@@ -2937,6 +2937,29 @@ export async function onRequest(context) {
     return json({ ok: true, ts: new Date().toISOString() });
   }
 
+  // ── Public: GET /sync/audio/* — serve audio files from R2 ───────────────
+  if (route.startsWith('audio/') && method === 'GET') {
+    const key = decodeURIComponent(route); // R2 keys use literal spaces, not %20
+    if (!env.STEMS_R2) return json({ error: 'Storage not configured' }, 503);
+    try {
+      const obj = await env.STEMS_R2.get(key);
+      if (!obj) return new Response('Not found', { status: 404, headers: CORS_HEADERS });
+      const ext = key.split('.').pop().toLowerCase();
+      const mimeMap = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4' };
+      const contentType = mimeMap[ext] || 'application/octet-stream';
+      const headers = {
+        'Content-Type': contentType,
+        'Cache-Control': 'public, max-age=86400',
+        'Accept-Ranges': 'bytes',
+        ...CORS_HEADERS,
+      };
+      if (obj.size) headers['Content-Length'] = String(obj.size);
+      return new Response(obj.body, { status: 200, headers });
+    } catch (err) {
+      return json({ error: 'Storage error', detail: err?.message }, 500);
+    }
+  }
+
   // ── Public: POST /sync/register — create a new organization or branch ────
   if (route === 'register' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
@@ -3323,6 +3346,65 @@ export async function onRequest(context) {
     return json({ ok: true, songs: results, total: results.length });
   }
 
+  // ── POST /sync/songs/vectorize — embed all org songs into Vectorize ──────
+  // Call once (or after bulk edits) to index the library for semantic search.
+  if (route === 'songs/vectorize' && method === 'POST') {
+    if (!env.AI || !env.VECTORIZE) return json({ error: 'AI or Vectorize not bound' }, 503);
+    const songMap = await kvGet(env, orgKey(orgId, 'songLibrary'), {});
+    const songs = Object.values(songMap);
+    if (songs.length === 0) return json({ ok: true, indexed: 0 });
+    let indexed = 0;
+    const BATCH = 20;
+    for (let i = 0; i < songs.length; i += BATCH) {
+      const batch = songs.slice(i, i + BATCH);
+      const texts = batch.map(s =>
+        `${s.title || ''} ${s.artist || ''} ${s.key || ''} ${s.tags || ''} ${s.notes || ''}`.trim()
+      );
+      try {
+        const resp = await env.AI.run('@cf/baai/bge-small-en-v1.5', { text: texts });
+        const embeddings = resp?.data || [];
+        const vectors = batch.map((s, j) => ({
+          id: `${orgId}:${s.id}`,
+          values: embeddings[j] || [],
+          metadata: { orgId, songId: s.id, title: s.title || '', artist: s.artist || '', key: s.key || '' },
+        }));
+        await env.VECTORIZE.upsert(vectors);
+        indexed += vectors.length;
+      } catch (e) {
+        console.warn('[vectorize] batch failed', e?.message);
+      }
+    }
+    return json({ ok: true, indexed });
+  }
+
+  // ── GET /sync/songs/similar?q=...&limit=10 — semantic song search ─────────
+  if (route === 'songs/similar' && method === 'GET') {
+    if (!env.AI || !env.VECTORIZE) return json({ error: 'AI or Vectorize not bound' }, 503);
+    const q = (url.searchParams.get('q') || '').trim();
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '10', 10), 50);
+    if (!q) return json({ ok: true, songs: [] });
+    try {
+      const embResp = await env.AI.run('@cf/baai/bge-small-en-v1.5', { text: [q] });
+      const queryVec = embResp?.data?.[0];
+      if (!queryVec) return json({ ok: true, songs: [] });
+      const results = await env.VECTORIZE.query(queryVec, {
+        topK: limit,
+        filter: { orgId },
+        returnMetadata: true,
+      });
+      const songs = (results?.matches || []).map(m => ({
+        id: m.metadata?.songId,
+        title: m.metadata?.title,
+        artist: m.metadata?.artist,
+        key: m.metadata?.key,
+        score: m.score,
+      }));
+      return json({ ok: true, songs });
+    } catch (e) {
+      return json({ error: 'Vectorize query failed', detail: e?.message }, 500);
+    }
+  }
+
   // ── GET /sync/library-pull ───────────────────────────────────────────────
   if (route === 'library-pull' && method === 'GET') {
     const [songMap, people, services, plans, vocalAssignments, blockouts, messages] =
@@ -3453,6 +3535,27 @@ export async function onRequest(context) {
       people: mergedPeople.length,
       services: Object.values(servicesMap).length,
     });
+
+    // Vectorize — index new/updated songs (fire-and-forget)
+    if (env.AI && env.VECTORIZE && songs.length > 0) {
+      (async () => {
+        try {
+          const texts = songs.map(s =>
+            `${s.title || ''} ${s.artist || ''} ${s.key || ''} ${s.tags || ''} ${s.notes || ''}`.trim()
+          );
+          const resp = await env.AI.run('@cf/baai/bge-small-en-v1.5', { text: texts });
+          const embeddings = resp?.data || [];
+          const vectors = songs
+            .map((s, j) => embeddings[j]?.length ? ({
+              id: `${orgId}:${s.id}`,
+              values: embeddings[j],
+              metadata: { orgId, songId: s.id, title: s.title || '', artist: s.artist || '', key: s.key || '' },
+            }) : null)
+            .filter(Boolean);
+          if (vectors.length) await env.VECTORIZE.upsert(vectors);
+        } catch { /* best-effort */ }
+      })();
+    }
 
     return json({
       ok: true,
