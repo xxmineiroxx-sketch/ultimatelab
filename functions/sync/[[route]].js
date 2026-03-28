@@ -54,8 +54,21 @@ function sanitizeFileName(value, fallback = 'audio.mp3') {
   return cleaned || fallback;
 }
 
-function stemSourcePublicUrl(origin, key) {
+function sanitizeStemSlot(value, fallback = 'track') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return normalized || fallback;
+}
+
+function stemObjectPublicUrl(origin, key) {
   return `${origin}/sync/stems/source/${encodeURIComponent(key)}`;
+}
+
+function stemSourcePublicUrl(origin, key) {
+  return stemObjectPublicUrl(origin, key);
 }
 
 function clipText(value, max = 12000) {
@@ -182,6 +195,120 @@ async function kvDelete(env, key) {
 
 function orgKey(orgId, type) {
   return `org:${orgId}:${type}`;
+}
+
+function pickDefinedStemFields(value = {}) {
+  const next = {};
+  const fields = [
+    'stems',
+    'harmonies',
+    'click_track',
+    'voice_guide',
+    'pad_track',
+    'fullMix',
+    'full_mix',
+    'lyrics',
+    'chordChart',
+    'chord_chart',
+    'sections',
+    'waveformPeaks',
+    'waveform_peaks',
+    'durationSec',
+    'duration_sec',
+    'timeSig',
+    'time_signature',
+    'key',
+    'bpm',
+    'tempo',
+  ];
+
+  for (const field of fields) {
+    if (
+      Object.prototype.hasOwnProperty.call(value || {}, field)
+      && value[field] !== undefined
+      && value[field] !== null
+      && value[field] !== ''
+    ) {
+      next[field] = value[field];
+    }
+  }
+
+  return next;
+}
+
+async function syncSongLibraryStemSnapshot(env, orgId, songId, stemEntry = {}, songPatch = {}) {
+  const resolvedSongId = String(songId || '').trim();
+  if (!resolvedSongId) return null;
+
+  const songMap = await kvGet(env, orgKey(orgId, 'songLibrary'), {});
+  const previousSong = songMap[resolvedSongId] && typeof songMap[resolvedSongId] === 'object'
+    ? songMap[resolvedSongId]
+    : { id: resolvedSongId };
+  const previousJob = previousSong.latestStemsJob && typeof previousSong.latestStemsJob === 'object'
+    ? previousSong.latestStemsJob
+    : {};
+  const previousResult = previousJob.result && typeof previousJob.result === 'object'
+    ? previousJob.result
+    : {};
+  const nextUpdatedAt = stemEntry.updatedAt || new Date().toISOString();
+  const nextResult = {
+    ...previousResult,
+    ...pickDefinedStemFields(stemEntry),
+  };
+
+  const nextSong = {
+    ...previousSong,
+    id: resolvedSongId,
+    createdAt: previousSong.createdAt || nextUpdatedAt,
+    updatedAt: nextUpdatedAt,
+  };
+
+  if (songPatch.title != null) {
+    const title = String(songPatch.title || '').trim();
+    if (title) nextSong.title = title;
+  } else if (!nextSong.title && stemEntry.title) {
+    nextSong.title = String(stemEntry.title || '').trim();
+  }
+
+  if (songPatch.artist != null) {
+    const artist = String(songPatch.artist || '').trim();
+    if (artist) nextSong.artist = artist;
+  } else if (!nextSong.artist && stemEntry.artist) {
+    nextSong.artist = String(stemEntry.artist || '').trim();
+  }
+
+  if (songPatch.youtubeLink != null) {
+    const youtubeLink = String(songPatch.youtubeLink || '').trim();
+    if (youtubeLink) nextSong.youtubeLink = youtubeLink;
+  }
+
+  const nextKey = String(stemEntry.key || '').trim();
+  if (nextKey) {
+    nextSong.key = nextKey;
+    nextSong.originalKey = nextKey;
+  }
+
+  const nextBpm = Number(stemEntry.bpm);
+  if (Number.isFinite(nextBpm) && nextBpm > 0) {
+    nextSong.bpm = nextBpm;
+  }
+
+  nextSong.latestStemsJob = {
+    ...previousJob,
+    id: String(stemEntry.jobId || previousJob.id || `manual_${makeId(12)}`),
+    jobId: String(stemEntry.jobId || previousJob.jobId || '').trim(),
+    status: 'COMPLETED',
+    source: String(stemEntry.source || previousJob.source || 'desktop_upload').trim(),
+    key: stemEntry.key ?? previousJob.key ?? nextResult.key ?? null,
+    bpm: stemEntry.bpm ?? previousJob.bpm ?? nextResult.bpm ?? null,
+    updatedAt: nextUpdatedAt,
+    completedAt: nextUpdatedAt,
+    result: nextResult,
+  };
+
+  songMap[resolvedSongId] = nextSong;
+  await kvPut(env, orgKey(orgId, 'songLibrary'), songMap);
+  return nextSong;
 }
 
 function globalMemberBlockoutsKey(email) {
@@ -2607,6 +2734,47 @@ export async function onRequest(context) {
     });
   }
 
+  // ── POST /sync/stems/upload-file — upload finished stem/media file to R2 ─
+  if (route === 'stems/upload-file' && method === 'POST') {
+    if (!env.STEMS_R2) {
+      return json({ error: 'Stem upload storage is not configured.' }, 503);
+    }
+    if (!request.body) return json({ error: 'file body required' }, 400);
+
+    const songId = clipText(url.searchParams.get('songId') || '', 160)
+      .replace(/[^a-zA-Z0-9._-]+/g, '_');
+    if (!songId) return json({ error: 'songId required' }, 400);
+
+    const uploadId = clipText(url.searchParams.get('uploadId') || makeId(12), 120)
+      .replace(/[^a-zA-Z0-9._-]+/g, '_');
+    const stemType = sanitizeStemSlot(
+      url.searchParams.get('stemType') || request.headers.get('x-stem-type') || 'track',
+      'track',
+    );
+    const fileName = sanitizeFileName(
+      url.searchParams.get('filename')
+        || request.headers.get('x-file-name')
+        || `${stemType}_${Date.now()}.m4a`,
+    );
+    const contentType = clipText(
+      request.headers.get('Content-Type') || 'application/octet-stream',
+      120,
+    ) || 'application/octet-stream';
+    const key = `processed-stems/${orgId}/${songId}/${uploadId}/${stemType}_${fileName}`;
+
+    await env.STEMS_R2.put(key, request.body, {
+      httpMetadata: { contentType },
+    });
+
+    return json({
+      ok: true,
+      songId,
+      stemType,
+      key,
+      fileUrl: stemObjectPublicUrl(url.origin, key),
+    });
+  }
+
   // ── GET /sync/library-pull ───────────────────────────────────────────────
   if (route === 'library-pull' && method === 'GET') {
     const [songMap, people, services, plans, vocalAssignments, blockouts, messages] =
@@ -2896,10 +3064,10 @@ export async function onRequest(context) {
         }, new Map()).values(),
       );
 
-      for (const recipient of emailRecipients) {
-        emailAttempted += 1;
-        try {
-          await sendAssignmentAlertEmail(env, {
+      emailAttempted = emailRecipients.length;
+      const emailResults = await Promise.allSettled(
+        emailRecipients.map((recipient) =>
+          sendAssignmentAlertEmail(env, {
             to: recipient.to,
             assignment: {
               orgName: org.name,
@@ -2911,11 +3079,14 @@ export async function onRequest(context) {
               serviceTime: updated.time || updated.startTime || '',
               roles: recipient.roles,
             },
-          });
-          emailSent += 1;
-        } catch (error) {
+          })
+        )
+      );
+      for (const result of emailResults) {
+        if (result.status === 'fulfilled') emailSent += 1;
+        else {
           emailFailed += 1;
-          console.log('[sync/publish] assignment email failed', recipient.to, error?.message || String(error));
+          console.log('[sync/publish] assignment email failed', result.reason?.message || String(result.reason));
         }
       }
     }
@@ -3182,13 +3353,24 @@ export async function onRequest(context) {
     if (!responseEmail) return json({ error: 'email required' }, 400);
     const resolvedName = personByEmail?.name || personName;
     const respondedAt = new Date().toISOString();
+    const { byId: peopleByIdForRespond } = buildPeopleIndexes(people);
 
     const applyResponseToTeam = (team = []) => {
       let didUpdate = false;
       const nextTeam = team.map((member) => {
-        if (!teamMemberMatchesResponse(member, personId, personUUID, role)) {
-          return member;
+        // Primary match: email, UUID, or linked UUID match
+        let matched = teamMemberMatchesResponse(member, personId, personUUID, role);
+        // Fallback: resolve member's personId via people KV to find their email
+        if (!matched && member.personId) {
+          const linkedPerson = peopleByIdForRespond[member.personId] || peopleByIdForRespond[normalizeLower(member.personId)] || null;
+          const linkedEmail = normalizeLower(linkedPerson?.email || '');
+          if (linkedEmail && linkedEmail === responseEmail) {
+            const memberRole = normalizeLower(member?.role || '');
+            const normalizedRole = normalizeLower(role || '');
+            matched = !normalizedRole || !memberRole || memberRole === normalizedRole;
+          }
         }
+        if (!matched) return member;
         didUpdate = true;
         return {
           ...member,
@@ -3237,6 +3419,15 @@ export async function onRequest(context) {
       };
       services[svcIdx].assignmentResponses[personId] = responseEntry;
       if (personUUID) services[svcIdx].assignmentResponses[normalizeLower(personUUID)] = responseEntry;
+      // Also index by any team member UUID that resolves to this email (handles UUID mismatch across systems)
+      const team = (services[svcIdx].plan?.team || services[svcIdx].team || []);
+      for (const member of team) {
+        if (!member.personId) continue;
+        const linked = peopleByIdForRespond[member.personId] || peopleByIdForRespond[normalizeLower(member.personId)];
+        if (linked && normalizeLower(linked.email) === responseEmail) {
+          services[svcIdx].assignmentResponses[normalizeLower(member.personId)] = responseEntry;
+        }
+      }
 
       if (services[svcIdx].plan && Array.isArray(services[svcIdx].plan.team)) {
         const { didUpdate, nextTeam } = applyResponseToTeam(services[svcIdx].plan.team || []);
@@ -3521,8 +3712,8 @@ export async function onRequest(context) {
   }
 
   // ── POST /sync/stems-store ───────────────────────────────────────────────
-  // Called by CineStage server after processing to store results in KV.
-  // Body: { songId, title, stems, harmonies, key, bpm, jobId }
+  // Called by CineStage server or desktop uploader after processing to store results in KV.
+  // Body: { songId, title, stems, harmonies, key, bpm, jobId, ...metadata }
   if (route === 'stems-store' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
     const { songId } = body;
@@ -3534,6 +3725,14 @@ export async function onRequest(context) {
       updatedAt: new Date().toISOString(),
     };
     await kvPut(env, orgKey(orgId, `stems:${songId}`), entry);
+    await syncSongLibraryStemSnapshot(env, orgId, songId, {
+      ...entry,
+      source: body.source || existing.source || 'desktop_upload',
+    }, {
+      title: body.title,
+      artist: body.artist,
+      youtubeLink: body.youtubeLink,
+    });
     return json({ ok: true, songId });
   }
 
@@ -4787,16 +4986,38 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     // Also update legacy stems:songId entry for backward compat
     if (status === 'COMPLETED' && result?.stems && job.songId) {
       const prev = await kvGet(env, orgKey(targetOrgId, `stems:${job.songId}`), {});
-      await kvPut(env, orgKey(targetOrgId, `stems:${job.songId}`), {
+      const entry = {
         ...prev,
         songId: job.songId,
         title: job.input?.title,
         stems: result.stems || {},
         harmonies: result.harmonies || {},
+        click_track: result.click_track,
+        voice_guide: result.voice_guide,
+        pad_track: result.pad_track,
+        fullMix: result.fullMix,
+        full_mix: result.full_mix,
+        lyrics: result.lyrics,
+        chordChart: result.chordChart,
+        sections: result.sections,
+        waveformPeaks: result.waveformPeaks,
+        waveform_peaks: result.waveform_peaks,
+        durationSec: result.durationSec,
+        duration_sec: result.duration_sec,
+        timeSig: result.timeSig,
+        time_signature: result.time_signature,
         key,
         bpm,
         jobId,
         updatedAt: job.updatedAt,
+      };
+      await kvPut(env, orgKey(targetOrgId, `stems:${job.songId}`), entry);
+      await syncSongLibraryStemSnapshot(env, targetOrgId, job.songId, {
+        ...entry,
+        source: 'cinestage_worker',
+      }, {
+        title: job.input?.title,
+        artist: job.input?.artist,
       });
     }
     return json({ ok: true });
