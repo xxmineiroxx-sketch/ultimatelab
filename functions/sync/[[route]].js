@@ -5382,9 +5382,16 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
 
   // ── POST /sync/stems/submit ──────────────────────────────────────────────
   // Queue a stem separation job. Publishes to CF Queue → triggers Container immediately.
-  // Body: { fileUrl, title, songId, separateHarmonies, voiceCount }
+  // Body: { fileUrl, title, songId, separateHarmonies, voiceCount, enhanceInstrumentStems }
   if (route === 'stems/submit' && method === 'POST') {
-    const { fileUrl, title = 'Untitled', songId, separateHarmonies = true, voiceCount = 3 } =
+    const {
+      fileUrl,
+      title = 'Untitled',
+      songId,
+      separateHarmonies = true,
+      voiceCount = 3,
+      enhanceInstrumentStems = true,
+    } =
       await request.json().catch(() => ({}));
     if (!fileUrl) return json({ error: 'fileUrl required' }, 400);
     const jobId = makeId();
@@ -5394,7 +5401,14 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
       jobType: 'STEM_SEPARATION',
       orgId,
       songId: songId || jobId,
-      input: { fileUrl, sourceUrl: fileUrl, title, separateHarmonies, voiceCount },
+      input: {
+        fileUrl,
+        sourceUrl: fileUrl,
+        title,
+        separateHarmonies,
+        voiceCount,
+        enhanceInstrumentStems,
+      },
       result: null,
       error: null,
       key: null,
