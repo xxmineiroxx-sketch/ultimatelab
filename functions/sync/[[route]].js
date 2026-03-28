@@ -2874,8 +2874,11 @@ function mergeStoredPeople(existingPeople = [], incomingPeople = []) {
 // ── Auth ───────────────────────────────────────────────────────────────────
 
 async function verifyAuth(env, request) {
-  const orgId = request.headers.get('x-org-id') || '';
-  const secret = request.headers.get('x-secret-key') || '';
+  const url = new URL(request.url);
+  // Accept auth via headers (standard) OR query params (needed for browser WebSocket upgrades
+  // where custom headers can't be set — e.g. Electron MIDI bridge, SetlistRunner)
+  const orgId  = request.headers.get('x-org-id')     || url.searchParams.get('orgId')  || '';
+  const secret = request.headers.get('x-secret-key') || url.searchParams.get('sk')     || '';
   if (!orgId || !secret) return null;
 
   const org = await kvGet(env, `org:${orgId}`, null);
