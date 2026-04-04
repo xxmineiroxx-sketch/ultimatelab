@@ -447,6 +447,181 @@ function clipText(value, max = 12000) {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
+const MUSIC_KEY_PITCH_CLASS = {
+  C: 0,
+  'B#': 0,
+  'C#': 1,
+  Db: 1,
+  D: 2,
+  'D#': 3,
+  Eb: 3,
+  E: 4,
+  Fb: 4,
+  F: 5,
+  'E#': 5,
+  'F#': 6,
+  Gb: 6,
+  G: 7,
+  'G#': 8,
+  Ab: 8,
+  A: 9,
+  'A#': 10,
+  Bb: 10,
+  B: 11,
+  Cb: 11,
+};
+
+function parseMusicKey(value) {
+  const raw = String(value || '')
+    .replace(/♯/g, '#')
+    .replace(/♭/g, 'b')
+    .trim();
+  if (!raw) return { raw: '', tonic: '', pitchClass: null, mode: '' };
+  const match = raw.match(/^([A-Ga-g])([#b]?)(.*)$/);
+  if (!match) return { raw, tonic: raw, pitchClass: null, mode: '' };
+  const tonic = `${match[1].toUpperCase()}${match[2] || ''}`;
+  const tail = String(match[3] || '').trim().toLowerCase();
+  const mode = /\bmin(or)?\b/.test(tail) || /^m\b/.test(tail) || /m$/.test(raw.toLowerCase())
+    ? 'minor'
+    : 'major';
+  return {
+    raw,
+    tonic,
+    pitchClass: Object.prototype.hasOwnProperty.call(MUSIC_KEY_PITCH_CLASS, tonic)
+      ? MUSIC_KEY_PITCH_CLASS[tonic]
+      : null,
+    mode,
+  };
+}
+
+function normalizeRecommendationSong(song = {}) {
+  return {
+    id: clipText(String(song.id || ''), 80),
+    title: clipText(String(song.title || song.name || ''), 120),
+    artist: clipText(String(song.artist || ''), 120),
+    key: clipText(String(song.key || song.originalKey || ''), 12),
+    bpm: Number.isFinite(Number(song.bpm)) ? Number(song.bpm) : null,
+    tags: Array.isArray(song.tags) ? song.tags.filter(Boolean).map((tag) => String(tag)) : [],
+  };
+}
+
+function recommendationSongKey(song) {
+  return `${normalizeLower(song?.title)}::${normalizeLower(song?.artist)}`;
+}
+
+function scoreRecommendationCandidate(candidate, currentSong = {}) {
+  let score = 0;
+  const reasons = [];
+
+  const currentKey = parseMusicKey(currentSong.key);
+  const candidateKey = parseMusicKey(candidate.key);
+  if (currentKey.pitchClass != null && candidateKey.pitchClass != null) {
+    const diff = Math.abs(currentKey.pitchClass - candidateKey.pitchClass);
+    const wrappedDiff = Math.min(diff, 12 - diff);
+    if (wrappedDiff === 0) {
+      score += currentKey.mode === candidateKey.mode ? 5 : 4;
+      reasons.push('same key center');
+    } else if (wrappedDiff === 5 || wrappedDiff === 7) {
+      score += 4;
+      reasons.push('strong key transition');
+    } else if (wrappedDiff <= 2) {
+      score += 2;
+      reasons.push('close harmonic move');
+    }
+  }
+
+  const currentBpm = Number.isFinite(Number(currentSong.bpm)) ? Number(currentSong.bpm) : null;
+  if (currentBpm != null && candidate.bpm != null) {
+    const bpmDiff = Math.abs(candidate.bpm - currentBpm);
+    if (bpmDiff <= 4) {
+      score += 3;
+      reasons.push('tempo matches closely');
+    } else if (bpmDiff <= 10) {
+      score += 2;
+      reasons.push('tempo stays comfortable');
+    } else if (bpmDiff <= 18) {
+      score += 1;
+      reasons.push('manageable tempo shift');
+    } else if (bpmDiff >= 35) {
+      score -= 2;
+    }
+  }
+
+  const lowerTags = Array.isArray(candidate.tags) ? candidate.tags.map(normalizeLower) : [];
+  if (lowerTags.some((tag) => ['worship', 'service', 'setlist'].includes(tag))) {
+    score += 1;
+  }
+
+  return {
+    ...candidate,
+    score,
+    reasonSummary: reasons.length > 0 ? reasons.join(', ') : 'good worship set transition',
+  };
+}
+
+function collectRecommendationCandidates(songMap = {}, songPool = [], currentSong = {}, setlistContext = []) {
+  const pool = [];
+  const seen = new Set();
+  const blocked = new Set([
+    normalizeLower(currentSong?.title),
+    ...((Array.isArray(setlistContext) ? setlistContext : []).map((song) => normalizeLower(song?.title))),
+  ]);
+
+  const sources = [
+    ...Object.values(songMap || {}),
+    ...(Array.isArray(songPool) ? songPool : []),
+  ];
+
+  for (const rawSong of sources) {
+    const song = normalizeRecommendationSong(rawSong);
+    if (!song.title) continue;
+    if (blocked.has(normalizeLower(song.title))) continue;
+    const key = recommendationSongKey(song);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pool.push(song);
+  }
+
+  return pool
+    .map((song) => scoreRecommendationCandidate(song, currentSong))
+    .sort((a, b) => (b.score - a.score) || a.title.localeCompare(b.title));
+}
+
+function normalizeAiRecommendations(aiItems = [], candidates = [], currentKey = '') {
+  if (!Array.isArray(aiItems) || aiItems.length === 0) return [];
+  const byTitle = new Map(candidates.map((candidate) => [normalizeLower(candidate.title), candidate]));
+  const picked = [];
+  const seen = new Set();
+  for (const item of aiItems) {
+    const title = clipText(String(item?.title || ''), 120);
+    if (!title) continue;
+    const matched = byTitle.get(normalizeLower(title));
+    const dedupeKey = recommendationSongKey({ title, artist: matched?.artist || item?.artist || '' });
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    picked.push({
+      title: matched?.title || title,
+      artist: clipText(String(matched?.artist || item?.artist || ''), 120),
+      reason: clipText(String(item?.reason || matched?.reasonSummary || 'Flows well with the current song.'), 300),
+      suggestedKey: clipText(String(item?.suggestedKey || matched?.key || currentKey), 12),
+    });
+    if (picked.length >= 3) break;
+  }
+  return picked;
+}
+
+function buildFallbackRecommendations(candidates = [], currentKey = '') {
+  return candidates.slice(0, 3).map((candidate) => ({
+    title: candidate.title,
+    artist: candidate.artist,
+    reason: clipText(
+      `${candidate.reasonSummary.charAt(0).toUpperCase()}${candidate.reasonSummary.slice(1)}.`,
+      300,
+    ),
+    suggestedKey: clipText(String(candidate.key || currentKey), 12),
+  }));
+}
+
 const RESET_CODE_TTL_MS = 15 * 60 * 1000;
 const VERIFICATION_CODE_TTL_MS = 10 * 60 * 1000;
 const MAX_TRUSTED_DEVICES = 8;
@@ -6892,9 +7067,8 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
 
   // ── POST /sync/ai/recommend — Workers AI song recommendations ────────────
   if (route === 'ai/recommend' && method === 'POST') {
-    if (!env.AI) return json({ error: 'AI features are not configured for this environment.' }, 503);
     const body = await request.json().catch(() => ({}));
-    const { currentSong = {}, setlistContext = [] } = body;
+    const { currentSong = {}, setlistContext = [], songPool = [] } = body;
 
     const currentTitle = clipText(String(currentSong.title || 'Unknown'), 80);
     const currentKey   = clipText(String(currentSong.key   || 'Unknown'), 12);
@@ -6903,44 +7077,57 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
       ? setlistContext.slice(0, 8).map((s, i) =>
           `${i + 1}. "${clipText(String(s?.title || ''), 60)}" (Key: ${clipText(String(s?.key || '?'), 12)}, BPM: ${s?.bpm || '?'})`)
       : [];
+    const songMap = await kvGet(env, orgKey(orgId, 'songLibrary'), {});
+    const candidatePool = collectRecommendationCandidates(
+      songMap,
+      songPool,
+      { title: currentTitle, key: currentKey, bpm: currentBpm },
+      setlistContext,
+    );
+    const candidateLines = candidatePool.slice(0, 12).map((song, index) =>
+      `${index + 1}. "${clipText(song.title, 60)}" by ${clipText(song.artist || 'Unknown', 60)} (Key: ${clipText(song.key || '?', 12)}, BPM: ${song.bpm || '?'}, Fit: ${song.reasonSummary})`);
 
-    const systemPrompt = 'You are a worship music director assistant. Recommend 3 worship songs that flow well after the given song. Consider key compatibility, energy arc, and typical setlist flow. Respond with a JSON object exactly like: {"recommendations": [{"title": "...", "artist": "...", "reason": "...", "suggestedKey": "..."}]}. Use only valid JSON. No markdown. No extra text.';
+    const systemPrompt = 'You are a worship music director assistant. Recommend exactly 3 songs that flow well next. Use only songs from the provided candidate pool. Consider key compatibility, energy arc, and typical setlist flow. Respond with a JSON object exactly like: {"recommendations": [{"title": "...", "artist": "...", "reason": "...", "suggestedKey": "..."}]}. Use only valid JSON. No markdown. No extra text.';
     const userPrompt = [
       `Current song: "${currentTitle}" — Key: ${currentKey}${currentBpm ? `, BPM: ${currentBpm}` : ''}.`,
       contextLines.length > 0 ? `Setlist so far:\n${contextLines.join('\n')}` : 'This is the first song on the setlist.',
+      candidateLines.length > 0 ? `Candidate songs:\n${candidateLines.join('\n')}` : 'Candidate songs: none supplied.',
       'What 3 songs would flow well next?',
     ].join('\n');
 
     let recommendations = [];
-    try {
-      const aiResult = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        max_tokens: 512,
-        temperature: 0.7,
-      });
-      const rawResponse = aiResult?.response || aiResult?.result?.response || '';
-      const jsonMatch = rawResponse.match(/\{[\s\S]*"recommendations"[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(parsed.recommendations)) {
-          recommendations = parsed.recommendations.slice(0, 3).map(r => ({
-            title: clipText(String(r.title || ''), 120),
-            artist: clipText(String(r.artist || ''), 120),
-            reason: clipText(String(r.reason || ''), 300),
-            suggestedKey: clipText(String(r.suggestedKey || currentKey), 12),
-          }));
+    if (env.AI && candidatePool.length > 0) {
+      try {
+        const aiResult = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: 512,
+          temperature: 0.7,
+        });
+        const rawResponse = aiResult?.response || aiResult?.result?.response || '';
+        const jsonMatch = rawResponse.match(/\{[\s\S]*"recommendations"[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          recommendations = normalizeAiRecommendations(parsed.recommendations, candidatePool, currentKey);
         }
+      } catch (err) {
+        console.log('[ai/recommend] error:', err?.message || String(err));
       }
-    } catch (err) {
-      console.log('[ai/recommend] error:', err?.message || String(err));
-      return json({ error: 'AI recommendation failed. Please try again.' }, 502);
+    }
+
+    if (recommendations.length === 0) {
+      recommendations = buildFallbackRecommendations(candidatePool, currentKey);
     }
 
     trackEvent(env, orgId, 'ai_call', { endpoint: 'recommend', currentSong: currentTitle, resultCount: recommendations.length });
-    return json({ ok: true, recommendations, currentSong: { title: currentTitle, key: currentKey, bpm: currentBpm } });
+    return json({
+      ok: true,
+      recommendations,
+      currentSong: { title: currentTitle, key: currentKey, bpm: currentBpm },
+      candidateCount: candidatePool.length,
+    });
   }
 
   // ── GET /sync/ai/stats — D1 analytics summary for the org ─────────────
