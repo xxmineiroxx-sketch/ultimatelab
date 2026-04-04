@@ -3828,6 +3828,10 @@ export async function onRequest(context) {
       songs = [], people = [], services = [],
       plans = {}, vocalAssignments = {}, blockouts = [],
       deletedServices = [],
+      replacePeopleSnapshot = false,
+      replaceServicesSnapshot = false,
+      replacePlansSnapshot = false,
+      replaceVocalAssignmentsSnapshot = false,
     } = body;
 
     const [songMap, existingPeople, existingServices, existingPlans, existingVocals, existingBlockouts] =
@@ -3846,7 +3850,9 @@ export async function onRequest(context) {
     }
 
     // Merge people by id, email, and phone so invites/auth stay stable
-    const mergedPeople = mergeStoredPeople(existingPeople, people);
+    const mergedPeople = replacePeopleSnapshot === true
+      ? mergeStoredPeople([], people)
+      : mergeStoredPeople(existingPeople, people);
 
     // Merge services
     const deletedServiceIds = new Set(
@@ -3855,7 +3861,7 @@ export async function onRequest(context) {
         .filter(Boolean),
     );
     const servicesMap = Object.fromEntries(
-      existingServices
+      (replaceServicesSnapshot === true ? [] : existingServices)
         .filter((service) => service?.id && !deletedServiceIds.has(service.id))
         .map((service) => [service.id, service]),
     );
@@ -3865,15 +3871,18 @@ export async function onRequest(context) {
       const hasIncomingPlan = s.plan && typeof s.plan === 'object';
       const mergedServicePlan = hasIncomingPlan
         ? {
-            ...(currentService.plan || {}),
+            ...(replaceServicesSnapshot === true ? {} : (currentService.plan || {})),
             ...s.plan,
             team: Array.isArray(s.plan?.team)
-              ? mergePlanTeamEntries(currentService.plan?.team || [], s.plan.team || [])
-              : (currentService.plan?.team || []),
+              ? mergePlanTeamEntries(
+                  (replaceServicesSnapshot === true ? [] : (currentService.plan?.team || [])),
+                  s.plan.team || [],
+                )
+              : (replaceServicesSnapshot === true ? [] : (currentService.plan?.team || [])),
           }
         : currentService.plan;
       servicesMap[s.id] = {
-        ...currentService,
+        ...(replaceServicesSnapshot === true ? {} : currentService),
         ...s,
         assignmentResponses: mergeAssignmentResponseMaps(
           currentService.assignmentResponses || {},
@@ -3884,13 +3893,35 @@ export async function onRequest(context) {
     }
 
     // Merge plans while preserving newer accepted/declined statuses.
-    const mergedPlans = mergeStoredPlans(existingPlans, plans);
+    const mergedPlans = replacePlansSnapshot === true
+      ? Object.fromEntries(
+          Object.entries(plans || {}).map(([planId, rawIncomingPlan]) => {
+            const incomingPlan =
+              rawIncomingPlan && typeof rawIncomingPlan === 'object'
+                ? rawIncomingPlan
+                : {};
+            const currentPlan =
+              existingPlans[planId] && typeof existingPlans[planId] === 'object'
+                ? existingPlans[planId]
+                : {};
+            return [planId, {
+              ...incomingPlan,
+              serviceId: incomingPlan.serviceId || planId,
+              team: Array.isArray(incomingPlan.team)
+                ? mergePlanTeamEntries(currentPlan.team || [], incomingPlan.team || [])
+                : [],
+            }];
+          }),
+        )
+      : mergeStoredPlans(existingPlans, plans);
     deletedServiceIds.forEach((serviceId) => {
       delete mergedPlans[serviceId];
     });
 
     // Merge vocal assignments
-    const mergedVocals = { ...existingVocals, ...vocalAssignments };
+    const mergedVocals = replaceVocalAssignmentsSnapshot === true
+      ? { ...(vocalAssignments || {}) }
+      : { ...existingVocals, ...vocalAssignments };
     deletedServiceIds.forEach((serviceId) => {
       delete mergedVocals[serviceId];
     });
