@@ -44,6 +44,30 @@ function makeId(len = 24) {
   return id;
 }
 
+// Verify Stripe webhook signature (HMAC-SHA256, no Node crypto needed)
+async function verifyStripeWebhook(rawBody, sigHeader, secret) {
+  const parts = sigHeader.split(',').reduce((acc, part) => {
+    const [k, v] = part.split('=');
+    acc[k] = v;
+    return acc;
+  }, {});
+  const timestamp = parts.t;
+  const signature = parts.v1;
+  if (!timestamp || !signature) throw new Error('Missing t or v1 in Stripe-Signature');
+  const tolerance = 300; // 5 minutes
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > tolerance) {
+    throw new Error('Timestamp outside tolerance');
+  }
+  const payload = `${timestamp}.${rawBody}`;
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+  const expected = Array.from(new Uint8Array(mac)).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (expected !== signature) throw new Error('Signature mismatch');
+  return JSON.parse(rawBody);
+}
+
 function sanitizeFileName(value, fallback = 'audio.mp3') {
   const raw = String(value || '').trim();
   if (!raw) return fallback;
@@ -283,6 +307,130 @@ function normalizeStemPayload(input = {}) {
   if (hasStemEntries) payload.stems = normalizedStems;
   if (Object.keys(normalizedHarmonies).length) payload.harmonies = normalizedHarmonies;
   return payload;
+}
+
+function summarizeStemPayload(input = {}) {
+  const normalized = normalizeStemPayload(input);
+  const stemTypes = new Set();
+  const harmonies = normalized.harmonies && typeof normalized.harmonies === 'object'
+    ? normalized.harmonies
+    : {};
+
+  if (normalized.stems && typeof normalized.stems === 'object') {
+    Object.entries(normalized.stems).forEach(([rawKey, rawValue]) => {
+      const url = stemValueUrl(rawValue);
+      if (!url) return;
+      const rawType = rawValue && typeof rawValue === 'object' ? rawValue.type : rawKey;
+      const rawLabel = rawValue && typeof rawValue === 'object' ? rawValue.label : '';
+      const canonical = canonicalizeStemType(rawType || rawKey, rawLabel, rawKey);
+      if (canonical) stemTypes.add(canonical);
+    });
+  }
+
+  const harmonyCount = Object.values(harmonies)
+    .map((value) => stemValueUrl(value))
+    .filter(Boolean)
+    .length;
+
+  return {
+    normalized,
+    stemTypes,
+    harmonyCount,
+  };
+}
+
+function evaluateStemPayloadForReuse(input = {}, options = {}) {
+  const summary = summarizeStemPayload(input);
+  const { stemTypes, harmonyCount } = summary;
+  const needsAdvanced = options.enhanceInstrumentStems !== false;
+  const needsHarmonies = options.separateHarmonies !== false;
+
+  const hasBaseStems = (
+    stemTypes.has('drums')
+    && stemTypes.has('bass')
+    && stemTypes.has('vocals')
+  );
+  const hasAdvancedStems = !needsAdvanced || (
+    stemTypes.has('keys')
+    && stemTypes.has('guitars')
+  );
+  const hasRequestedHarmonies = !needsHarmonies || harmonyCount > 0;
+
+  return {
+    ...summary,
+    usable: hasBaseStems && hasAdvancedStems && hasRequestedHarmonies,
+  };
+}
+
+function pickReusableStemCandidate(candidates = [], options = {}) {
+  const usableCandidates = candidates
+    .filter(Boolean)
+    .map((candidate) => {
+      const evaluation = evaluateStemPayloadForReuse(candidate.payload || {}, options);
+      return {
+        ...candidate,
+        evaluation,
+        updatedAt: (
+          candidate.updatedAt
+          || candidate.payload?.updatedAt
+          || candidate.payload?.completedAt
+          || candidate.payload?.createdAt
+          || ''
+        ),
+      };
+    })
+    .filter((candidate) => {
+      const status = String(candidate.status || '').toUpperCase();
+      return status !== 'FAILED' && candidate.evaluation.usable;
+    })
+    .sort((a, b) => (
+      new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime()
+    ));
+
+  return usableCandidates[0] || null;
+}
+
+async function findReusableStemCandidateForSong(env, orgId, songId, options = {}) {
+  const resolvedSongId = String(songId || '').trim();
+  if (!resolvedSongId) return null;
+
+  const candidates = [];
+  const existingStemEntry = await kvGet(env, orgKey(orgId, `stems:${resolvedSongId}`), null);
+  if (existingStemEntry && typeof existingStemEntry === 'object') {
+    candidates.push({
+      source: 'stems_store',
+      updatedAt: existingStemEntry.updatedAt || existingStemEntry.createdAt,
+      payload: existingStemEntry,
+    });
+  }
+
+  const songMap = await kvGet(env, orgKey(orgId, 'songLibrary'), {});
+  const songEntry = songMap && typeof songMap === 'object'
+    ? songMap[resolvedSongId]
+    : null;
+  const latestJob = songEntry?.latestStemsJob && typeof songEntry.latestStemsJob === 'object'
+    ? songEntry.latestStemsJob
+    : null;
+
+  if (latestJob?.result && typeof latestJob.result === 'object') {
+    candidates.push({
+      source: latestJob.source || 'song_library',
+      status: latestJob.status,
+      updatedAt: latestJob.updatedAt || latestJob.completedAt || songEntry?.updatedAt,
+      payload: {
+        ...latestJob.result,
+        title: songEntry?.title,
+        artist: songEntry?.artist,
+        key: latestJob.key ?? latestJob.result.key,
+        bpm: latestJob.bpm ?? latestJob.result.bpm,
+        updatedAt: latestJob.updatedAt || songEntry?.updatedAt,
+        completedAt: latestJob.completedAt,
+        jobId: latestJob.jobId || latestJob.id,
+      },
+    });
+  }
+
+  return pickReusableStemCandidate(candidates, options);
 }
 
 function stemObjectPublicUrl(origin, key) {
@@ -2315,6 +2463,53 @@ function isMemberOnlySystemMessage(message = {}) {
   return audience === 'member' || messageType === 'reminder' || messageType === 'birthday_greeting';
 }
 
+function isServicePublished(service = {}) {
+  return Boolean(
+    String(
+      service?.publishedAt ||
+      service?.published_at ||
+      '',
+    ).trim(),
+  );
+}
+
+function buildReminderRecipients(team = [], emailById = {}) {
+  const recipientsByEmail = {};
+
+  for (const member of Array.isArray(team) ? team : []) {
+    let memberEmail = normalizeLower(member?.email || '');
+    let memberName = String(member?.name || '').trim();
+
+    if (!memberEmail && member?.personId) {
+      const linked = emailById[normalizeLower(member.personId)] || null;
+      if (linked) {
+        memberEmail = normalizeLower(linked.email || '');
+        memberName = memberName || String(linked.name || '').trim();
+      }
+    }
+    if (!memberEmail) continue;
+
+    const existing = recipientsByEmail[memberEmail] || {
+      email: memberEmail,
+      name: memberName,
+      roles: [],
+    };
+    if (!existing.name && memberName) existing.name = memberName;
+
+    const nextRoles = new Set(existing.roles);
+    const singleRole = String(member?.role || '').trim();
+    if (singleRole) nextRoles.add(singleRole);
+    for (const role of Array.isArray(member?.roles) ? member.roles : []) {
+      const normalizedRole = String(role || '').trim();
+      if (normalizedRole) nextRoles.add(normalizedRole);
+    }
+    existing.roles = [...nextRoles];
+    recipientsByEmail[memberEmail] = existing;
+  }
+
+  return Object.values(recipientsByEmail);
+}
+
 function buildAssignmentAppLink(serviceId, decision = '') {
   const params = new URLSearchParams();
   const normalizedServiceId = String(serviceId || '').trim();
@@ -3256,6 +3451,7 @@ export async function onRequest(context) {
         let emailSent = 0, msgCreated = 0, pushSent = 0;
 
         for (const service of (Array.isArray(services) ? services : [])) {
+          if (!isServicePublished(service)) continue;
           const rawDate = service.date || service.serviceDate || '';
           if (!rawDate) continue;
           const serviceDate = rawDate.slice(0, 10);
@@ -3271,24 +3467,18 @@ export async function onRequest(context) {
           const orgName = orgMeta.name || 'Your Church';
           const songs = Array.isArray(plan.songs) ? plan.songs.map(s => s.title || s.name || '').filter(Boolean) : [];
 
-          for (const member of team) {
-            let memberEmail = normalizeLower(member.email || '');
-            let memberName = String(member.name || '').trim();
-            if (!memberEmail && member.personId) {
-              const linked = emailById[normalizeLower(member.personId)] || null;
-              if (linked) { memberEmail = linked.email; memberName = memberName || linked.name; }
-            }
-            if (!memberEmail) continue;
-
+          const recipients = buildReminderRecipients(team, emailById);
+          for (const recipient of recipients) {
+            const memberEmail = recipient.email;
+            const memberName = recipient.name;
             const dupKey = `${service.id}::${diffDays}d::${memberEmail}`;
             if (remindersSent[dupKey] || newlySent[dupKey]) continue;
 
-            const roles = member.role ? [member.role] : [];
             const reminderContent = buildServiceReminderContent({
               service,
               orgName,
               memberName,
-              roles,
+              roles: recipient.roles,
               songs,
               diffDays,
             });
@@ -3370,6 +3560,56 @@ export async function onRequest(context) {
     }
 
     return json({ ok: true, orgsProcessed: orgIds.length, results });
+  }
+
+  // ── Public: POST /sync/stripe/webhook — Stripe payment events ────────────
+  // Stripe sends raw body with Stripe-Signature header — must be unauthenticated.
+  if (route === 'stripe/webhook' && method === 'POST') {
+    if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET) {
+      return json({ error: 'Stripe not configured' }, 503);
+    }
+    const rawBody = await request.text();
+    const sig = request.headers.get('stripe-signature') || '';
+    // Verify Stripe signature using HMAC-SHA256
+    let event;
+    try {
+      event = await verifyStripeWebhook(rawBody, sig, env.STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+      console.error('[stripe/webhook] signature verification failed:', err.message);
+      return new Response('Webhook signature invalid', { status: 400 });
+    }
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const orgId = session.metadata?.orgId;
+      const planType = session.metadata?.plan || 'pro';
+      const subId = session.subscription || null;
+      const customerId = session.customer || null;
+      if (orgId && env.UM_DB) {
+        try {
+          // Set plan = 'pro', store stripe IDs, set 1-year expiry for one-time payments
+          const expiresAt = subId ? null : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+          await env.UM_DB.prepare(
+            `UPDATE orgs SET plan = ?, stripeCustomerId = ?, stripeSubId = ?, planExpiresAt = ? WHERE orgId = ?`
+          ).bind(planType, customerId, subId, expiresAt, orgId).run();
+          console.log(`[stripe/webhook] org ${orgId} upgraded to ${planType}`);
+        } catch (dbErr) {
+          console.error('[stripe/webhook] D1 update failed:', dbErr.message);
+        }
+      }
+    }
+    if (event.type === 'customer.subscription.deleted') {
+      const sub = event.data.object;
+      const customerId = sub.customer;
+      if (customerId && env.UM_DB) {
+        try {
+          await env.UM_DB.prepare(
+            `UPDATE orgs SET plan = 'free' WHERE stripeCustomerId = ?`
+          ).bind(customerId).run();
+          console.log(`[stripe/webhook] subscription cancelled for customer ${customerId}`);
+        } catch (_) {}
+      }
+    }
+    return json({ received: true });
   }
 
   // ── All routes below require auth ────────────────────────────────────────
@@ -4002,6 +4242,14 @@ export async function onRequest(context) {
     // Build a quick id→person map so we can look up emails by personId
     // Normalise a display name for fuzzy matching
     const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const isServicePublished = (service = {}) =>
+      Boolean(
+        String(
+          service?.publishedAt
+          || service?.published_at
+          || '',
+        ).trim(),
+      );
 
     function memberMatchesPerson(member) {
       const person   = personById[member.personId] || {};
@@ -4034,6 +4282,7 @@ export async function onRequest(context) {
     const assignments = [];
 
     for (const svc of services) {
+      if (!isServicePublished(svc)) continue;
       const plan = plans[svc.id] || svc.plan || {};
       const team = plan.team || [];
 
@@ -5459,7 +5708,7 @@ export async function onRequest(context) {
     return json(
       (Array.isArray(msgs) ? msgs : [])
         .filter((message) => !isMemberOnlySystemMessage(message))
-        .sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+        .sort((a, b) => (b.timestamp || b.createdAt || '').localeCompare(a.timestamp || a.createdAt || '')),
     );
   }
 
@@ -5479,7 +5728,7 @@ export async function onRequest(context) {
         (m.to || '').toLowerCase() === emailQ           // sent directly to user
       );
     });
-    return json(mine.sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
+    return json(mine.sort((a, b) => (b.timestamp || b.createdAt || '').localeCompare(a.timestamp || a.createdAt || '')));
   }
 
   // ── POST /sync/message/reply — admin replies to a message ───────────────
@@ -5574,7 +5823,7 @@ export async function onRequest(context) {
       (m.toEmail || '').toLowerCase() === emailQ ||
       (m.fromEmail || '').toLowerCase() === emailQ
     );
-    return json(mine.sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
+    return json(mine.sort((a, b) => (b.timestamp || b.createdAt || '').localeCompare(a.timestamp || a.createdAt || '')));
   }
 
   // ── POST /sync/xmessage/reply — reply to a cross-branch message ──────────
@@ -5722,29 +5971,138 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
 
   // ── POST /sync/stems/submit ──────────────────────────────────────────────
   // Queue a stem separation job. Publishes to CF Queue → triggers Container immediately.
-  // Body: { fileUrl, title, songId, separateHarmonies, voiceCount, enhanceInstrumentStems }
+  // Body: { fileUrl, title, songId, tier, separateHarmonies, voiceCount, enhanceInstrumentStems }
+  // tier: 'free' (CPU, 3-5 min) | 'fast' (GPU, ~60s) — fast requires pro plan or credits
   if (route === 'stems/submit' && method === 'POST') {
     const {
       fileUrl,
       title = 'Untitled',
       songId,
+      tier = 'free',
       separateHarmonies = true,
       voiceCount = 3,
       enhanceInstrumentStems = true,
     } =
       await request.json().catch(() => ({}));
     if (!fileUrl) return json({ error: 'fileUrl required' }, 400);
+
+    const resolvedSongId = String(songId || '').trim();
+    const requestedStemOptions = {
+      separateHarmonies,
+      enhanceInstrumentStems,
+    };
+
+    if (resolvedSongId) {
+      const cachedCandidate = await findReusableStemCandidateForSong(
+        env,
+        orgId,
+        resolvedSongId,
+        requestedStemOptions,
+      );
+
+      if (cachedCandidate) {
+        const nowIso = new Date().toISOString();
+        const cachedJobId = `cached_${makeId(12)}`;
+        const cachedResult = cachedCandidate.evaluation.normalized;
+        const cachedJob = {
+          id: cachedJobId,
+          title,
+          tier,
+          status: 'COMPLETED',
+          jobType: 'STEM_SEPARATION',
+          orgId,
+          songId: resolvedSongId,
+          input: {
+            fileUrl,
+            sourceUrl: fileUrl,
+            title,
+            tier,
+            separateHarmonies,
+            voiceCount,
+            enhanceInstrumentStems,
+          },
+          result: cachedResult,
+          error: null,
+          key: cachedResult.key ?? null,
+          bpm: cachedResult.bpm ?? null,
+          source: 'cached',
+          cacheHit: {
+            source: cachedCandidate.source,
+            updatedAt: cachedCandidate.updatedAt || nowIso,
+            availableStems: Array.from(cachedCandidate.evaluation.stemTypes).sort(),
+            harmonyCount: cachedCandidate.evaluation.harmonyCount,
+            requestedEnhanceInstrumentStems: enhanceInstrumentStems !== false,
+            requestedSeparateHarmonies: separateHarmonies !== false,
+          },
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          completedAt: nowIso,
+        };
+        await kvPut(env, orgKey(orgId, `stems:job:${cachedJobId}`), cachedJob);
+        return json(cachedJob);
+      }
+    }
+
+    // ── Tier gating ───────────────────────────────────────────────────────
+    // Load org plan from D1 (falls back to 'free' if not found)
+    let orgPlan = 'free';
+    let stemCredits = 0;
+    if (env.UM_DB) {
+      try {
+        const row = await env.UM_DB.prepare(
+          'SELECT plan, stemCredits, stemJobsThisMonth, stemJobsResetAt FROM orgs WHERE orgId = ?'
+        ).bind(orgId).first();
+        if (row) {
+          orgPlan = row.plan || 'free';
+          stemCredits = row.stemCredits || 0;
+          // Reset monthly counter if it's a new month
+          const resetAt = new Date(row.stemJobsResetAt || 0);
+          const now = new Date();
+          if (now.getFullYear() !== resetAt.getFullYear() || now.getMonth() !== resetAt.getMonth()) {
+            await env.UM_DB.prepare(
+              'UPDATE orgs SET stemJobsThisMonth = 0, stemJobsResetAt = ? WHERE orgId = ?'
+            ).bind(now.toISOString(), orgId).run();
+            row.stemJobsThisMonth = 0;
+          }
+          // Free plan: max 5 CPU jobs per month
+          if (orgPlan === 'free' && row.stemJobsThisMonth >= 5) {
+            return json({ error: 'Free plan limit reached (5 songs/month). Upgrade to Pro for unlimited processing.', limitReached: true }, 402);
+          }
+          // Fast GPU tier requires pro plan or credits
+          if (tier === 'fast' && orgPlan !== 'pro' && stemCredits <= 0) {
+            return json({ error: 'GPU fast processing requires Pro plan or GPU credits.', upgradeRequired: true }, 402);
+          }
+          // Deduct GPU credit if using fast tier
+          if (tier === 'fast' && orgPlan !== 'pro' && stemCredits > 0) {
+            await env.UM_DB.prepare(
+              'UPDATE orgs SET stemCredits = stemCredits - 1 WHERE orgId = ?'
+            ).bind(orgId).run();
+          }
+          // Increment monthly counter
+          await env.UM_DB.prepare(
+            'UPDATE orgs SET stemJobsThisMonth = stemJobsThisMonth + 1 WHERE orgId = ?'
+          ).bind(orgId).run();
+        }
+      } catch (_) { /* D1 not available — allow job (graceful degradation) */ }
+    }
+
     const jobId = makeId();
+    // For fast tier: pass the GPU worker URL; for free tier: leave blank (CPU fallback)
+    const modalWorkerUrl = tier === 'fast' ? (env.MODAL_WORKER_URL || env.RUNPOD_WORKER_URL || '') : '';
+
     const job = {
       id: jobId,
+      title,
+      tier,
       status: 'PENDING',
       jobType: 'STEM_SEPARATION',
       orgId,
-      songId: songId || jobId,
+      songId: resolvedSongId || jobId,
       input: {
         fileUrl,
         sourceUrl: fileUrl,
         title,
+        tier,
         separateHarmonies,
         voiceCount,
         enhanceInstrumentStems,
@@ -5763,7 +6121,7 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
       orgId,
       job,
       _secrets: {
-        modalWorkerUrl: env.MODAL_WORKER_URL || '',
+        modalWorkerUrl,
         anthropicApiKey: env.ANTHROPIC_API_KEY || '',
         syncOrgId: orgId,
         syncSecretKey: request.headers.get('x-secret-key') || '',
@@ -5823,9 +6181,125 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
   // Poll job status. Authenticated by org credentials.
   if (route.startsWith('stems/job/') && method === 'GET') {
     const jobId = route.slice('stems/job/'.length);
-    const job = await kvGet(env, orgKey(orgId, `stems:job:${jobId}`), null);
+    let job = await kvGet(env, orgKey(orgId, `stems:job:${jobId}`), null);
     if (!job) return json({ error: 'Job not found' }, 404);
+
+    const jobStatus = String(job.status || '').toUpperCase();
+    if ((jobStatus === 'PENDING' || jobStatus === 'PROCESSING') && job.songId) {
+      const cachedCandidate = await findReusableStemCandidateForSong(
+        env,
+        orgId,
+        job.songId,
+        {
+          separateHarmonies: job.input?.separateHarmonies,
+          enhanceInstrumentStems: job.input?.enhanceInstrumentStems,
+        },
+      );
+
+      if (cachedCandidate) {
+        const nowIso = new Date().toISOString();
+        const cachedResult = cachedCandidate.evaluation.normalized;
+        job = {
+          ...job,
+          status: 'COMPLETED',
+          result: cachedResult,
+          error: null,
+          key: cachedResult.key ?? job.key ?? null,
+          bpm: cachedResult.bpm ?? job.bpm ?? null,
+          source: 'cached',
+          cacheHit: {
+            source: cachedCandidate.source,
+            updatedAt: cachedCandidate.updatedAt || nowIso,
+            availableStems: Array.from(cachedCandidate.evaluation.stemTypes).sort(),
+            harmonyCount: cachedCandidate.evaluation.harmonyCount,
+            requestedEnhanceInstrumentStems: job.input?.enhanceInstrumentStems !== false,
+            requestedSeparateHarmonies: job.input?.separateHarmonies !== false,
+          },
+          updatedAt: nowIso,
+          completedAt: nowIso,
+        };
+        await kvPut(env, orgKey(orgId, `stems:job:${jobId}`), job);
+      }
+    }
+
     return json(job);
+  }
+
+  // ── GET /sync/stems/jobs ─────────────────────────────────────────────────
+  // List all stem jobs for this org (for the stems dashboard).
+  if (route === 'stems/jobs' && method === 'GET') {
+    // KV list: keys matching org:{orgId}:stems:job:*
+    const prefix = orgKey(orgId, 'stems:job:');
+    const listed = await env.STORE.list({ prefix });
+    const keys   = (listed?.keys || []).map(k => k.name);
+    const jobs   = await Promise.all(
+      keys.map(key => env.STORE.get(key, 'json').catch(() => null))
+    );
+    const sorted = jobs
+      .filter(Boolean)
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+      .slice(0, 100); // cap at 100 most recent
+    return json({ jobs: sorted });
+  }
+
+  // ── POST /sync/stems/checkout — create Stripe Checkout session ───────────
+  // Returns { url } — front-end redirects to Stripe-hosted checkout page.
+  // On success, Stripe webhook fires → flips plan to 'pro' in D1.
+  if (route === 'stems/checkout' && method === 'POST') {
+    if (!env.STRIPE_SECRET_KEY) {
+      return json({ error: 'Stripe not configured' }, 503);
+    }
+    const { plan = 'pro', successUrl, cancelUrl } = await request.json().catch(() => ({}));
+    const origin = request.headers.get('origin') || 'https://ultimatelab.co';
+    const success = successUrl || `${origin}/stems?upgraded=1`;
+    const cancel  = cancelUrl  || `${origin}/stems/upgrade`;
+
+    // Price IDs — set via wrangler secrets STRIPE_PRO_PRICE_ID
+    const priceId = env.STRIPE_PRO_PRICE_ID;
+    if (!priceId) return json({ error: 'STRIPE_PRO_PRICE_ID secret not set' }, 503);
+
+    const params = new URLSearchParams({
+      'mode': 'subscription',
+      'payment_method_types[]': 'card',
+      'line_items[0][price]': priceId,
+      'line_items[0][quantity]': '1',
+      'success_url': success,
+      'cancel_url': cancel,
+      'metadata[orgId]': orgId,
+      'metadata[plan]': plan,
+      'allow_promotion_codes': 'true',
+    });
+    // Pre-fill email if we have it
+    if (org.adminEmail) params.set('customer_email', org.adminEmail);
+
+    const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+    const stripeData = await stripeRes.json();
+    if (!stripeRes.ok) {
+      console.error('[stems/checkout] Stripe error:', stripeData?.error?.message);
+      return json({ error: stripeData?.error?.message || 'Stripe error' }, 500);
+    }
+    return json({ url: stripeData.url });
+  }
+
+  // ── GET /sync/stems/plan — return current plan info for this org ──────────
+  if (route === 'stems/plan' && method === 'GET') {
+    let planInfo = { plan: 'free', stemCredits: 0, stemJobsThisMonth: 0 };
+    if (env.UM_DB) {
+      try {
+        const row = await env.UM_DB.prepare(
+          'SELECT plan, stemCredits, stemJobsThisMonth, planExpiresAt FROM orgs WHERE orgId = ?'
+        ).bind(orgId).first();
+        if (row) planInfo = { plan: row.plan || 'free', stemCredits: row.stemCredits || 0, stemJobsThisMonth: row.stemJobsThisMonth || 0, planExpiresAt: row.planExpiresAt };
+      } catch (_) {}
+    }
+    return json(planInfo);
   }
 
   // ── POST /sync/stems/worker-poll ─────────────────────────────────────────
@@ -6228,6 +6702,9 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
   if (route === 'send-reminders' && (method === 'POST' || method === 'GET')) {
     const now = new Date();
     const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const reminderBody = method === 'POST'
+      ? await request.json().catch(() => ({}))
+      : {};
 
     const [services, plans, people, pushDevices] = await Promise.all([
       kvGet(env, orgKey(orgId, 'services'), []),
@@ -6246,7 +6723,12 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     const sentKey = orgKey(orgId, 'remindersSent');
     const remindersSent = await kvGet(env, sentKey, {});
 
-    const daysOutParamOrg = url.searchParams.get('daysOut') || (await request.json().catch(() => ({}))).daysOut;
+    const targetServiceId = String(
+      url.searchParams.get('serviceId') ||
+      reminderBody.serviceId ||
+      '',
+    ).trim();
+    const daysOutParamOrg = url.searchParams.get('daysOut') || reminderBody.daysOut;
     const TARGET_DAYS = daysOutParamOrg
       ? [parseInt(daysOutParamOrg, 10)].filter(n => n > 0 && n < 30)
       : [3, 1];
@@ -6255,6 +6737,8 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     const newlySent = {};
 
     for (const service of (Array.isArray(services) ? services : [])) {
+      if (targetServiceId && String(service?.id || '').trim() !== targetServiceId) continue;
+      if (!isServicePublished(service)) continue;
       const rawDate = service.date || service.serviceDate || '';
       if (!rawDate) continue;
       const serviceDate = rawDate.slice(0, 10); // YYYY-MM-DD
@@ -6276,27 +6760,18 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
         ? plan.songs.map(s => s.title || s.name || '').filter(Boolean)
         : [];
 
-      for (const member of team) {
-        let memberEmail = normalizeLower(member.email || '');
-        let memberName = String(member.name || '').trim();
-
-        // Fall back to people index if email not on the team record
-        if (!memberEmail && member.personId) {
-          const linked = emailById[normalizeLower(member.personId)] || null;
-          if (linked) { memberEmail = linked.email; memberName = memberName || linked.name; }
-        }
-        if (!memberEmail) continue;
-
-        // Dedup key
+      const recipients = buildReminderRecipients(team, emailById);
+      for (const recipient of recipients) {
+        const memberEmail = recipient.email;
+        const memberName = recipient.name;
         const dupKey = `${service.id}::${diffDays}d::${memberEmail}`;
         if (remindersSent[dupKey] || newlySent[dupKey]) continue;
 
-        const roles = member.role ? [member.role] : [];
         const reminderContent = buildServiceReminderContent({
           service,
           orgName,
           memberName,
-          roles,
+          roles: recipient.roles,
           songs,
           diffDays,
         });
