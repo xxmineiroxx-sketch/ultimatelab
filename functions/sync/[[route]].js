@@ -6873,6 +6873,90 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     return json({ ok: true });
   }
 
+  // ── POST /sync/setlist/submit — Leader submits a setlist for Admin approval ──
+  // Body: { serviceId, serviceName, serviceDate, serviceTime, plan, submittedBy: {email,name} }
+  if (route === 'setlist/submit' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const { serviceId, serviceName, serviceDate, serviceTime, plan, submittedBy } = body;
+    if (!serviceId || !plan) return json({ error: 'serviceId and plan required' }, 400);
+    const entry = {
+      id: `psl_${makeId(12)}`,
+      serviceId: String(serviceId).trim(),
+      serviceName: String(serviceName || '').trim(),
+      serviceDate: String(serviceDate || '').trim(),
+      serviceTime: String(serviceTime || '').trim(),
+      plan,
+      submittedBy: {
+        email: String(submittedBy?.email || '').trim(),
+        name:  String(submittedBy?.name  || 'Leader').trim(),
+      },
+      submittedAt: new Date().toISOString(),
+      status: 'pending',
+    };
+    const pending = await kvGet(env, orgKey(orgId, 'pending_setlists'), []);
+    // Replace if same service already submitted
+    const filtered = pending.filter(p => p.serviceId !== serviceId);
+    filtered.unshift(entry);
+    await kvPut(env, orgKey(orgId, 'pending_setlists'), filtered);
+    return json({ ok: true, id: entry.id });
+  }
+
+  // ── GET /sync/setlist/pending — Admin reads all pending setlists ──────────
+  if (route === 'setlist/pending' && method === 'GET') {
+    const pending = await kvGet(env, orgKey(orgId, 'pending_setlists'), []);
+    return json(pending.filter(p => p.status === 'pending'));
+  }
+
+  // ── POST /sync/setlist/approve?id= — Admin approves → auto-publishes ──────
+  if (route === 'setlist/approve' && method === 'POST') {
+    const id = url.searchParams.get('id') || '';
+    const pending = await kvGet(env, orgKey(orgId, 'pending_setlists'), []);
+    const idx = pending.findIndex(e => e.id === id);
+    if (idx === -1) return json({ error: 'Pending setlist not found' }, 404);
+    const [entry] = pending.splice(idx, 1);
+    entry.status = 'approved';
+    entry.approvedAt = new Date().toISOString();
+    pending.push(entry); // keep in archive
+
+    // Save the approved plan and mark service as published
+    const [services, plans] = await Promise.all([
+      kvGet(env, orgKey(orgId, 'services'), []),
+      kvGet(env, orgKey(orgId, 'plans'), {}),
+    ]);
+    const svcIdx = services.findIndex(s => s.id === entry.serviceId);
+    if (svcIdx >= 0) {
+      services[svcIdx] = {
+        ...services[svcIdx],
+        publishedAt: new Date().toISOString(),
+        publishedBy: 'admin_approval',
+      };
+    }
+    const mergedPlan = { ...(plans[entry.serviceId] || {}), ...(entry.plan || {}), serviceId: entry.serviceId };
+    plans[entry.serviceId] = mergedPlan;
+    if (svcIdx >= 0) services[svcIdx].plan = mergedPlan;
+
+    await Promise.all([
+      kvPut(env, orgKey(orgId, 'pending_setlists'), pending),
+      kvPut(env, orgKey(orgId, 'services'), services),
+      kvPut(env, orgKey(orgId, 'plans'), plans),
+    ]);
+    return json({ ok: true, serviceId: entry.serviceId });
+  }
+
+  // ── POST /sync/setlist/reject?id= — Admin rejects a pending setlist ──────
+  if (route === 'setlist/reject' && method === 'POST') {
+    const id = url.searchParams.get('id') || '';
+    const body = await request.json().catch(() => ({}));
+    const pending = await kvGet(env, orgKey(orgId, 'pending_setlists'), []);
+    const entry = pending.find(e => e.id === id);
+    if (!entry) return json({ error: 'Pending setlist not found' }, 404);
+    entry.status = 'rejected';
+    entry.rejectedAt = new Date().toISOString();
+    entry.rejectNote = String(body.note || '').trim();
+    await kvPut(env, orgKey(orgId, 'pending_setlists'), pending);
+    return json({ ok: true });
+  }
+
   // ── POST /sync/members/add — Admin adds a member ─────────────────────────
   if (route === 'members/add' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
