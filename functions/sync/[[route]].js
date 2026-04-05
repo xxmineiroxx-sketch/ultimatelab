@@ -6249,6 +6249,36 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
       }
     }
 
+    try {
+      const listed = await env.STORE.list({ prefix: orgKey(orgId, 'stems:job:'), limit: 100 });
+      const inFlightJobs = await Promise.all(
+        (listed?.keys || []).map(({ name }) => env.STORE.get(name, 'json').catch(() => null))
+      );
+      const requestedSeparateHarmonies = separateHarmonies !== false;
+      const requestedEnhanceInstrumentStems = enhanceInstrumentStems !== false;
+      const inFlightMatch = inFlightJobs
+        .filter(Boolean)
+        .filter((candidate) => {
+          const status = String(candidate.status || '').toUpperCase();
+          if (status !== 'PENDING' && status !== 'PROCESSING') return false;
+          const candidateFileUrl = String(candidate.input?.fileUrl || candidate.input?.sourceUrl || '').trim();
+          const sameSong = resolvedSongId && String(candidate.songId || '').trim() === resolvedSongId;
+          const sameFile = candidateFileUrl && candidateFileUrl === String(fileUrl).trim();
+          if (!sameSong && !sameFile) return false;
+          if (requestedSeparateHarmonies && candidate.input?.separateHarmonies === false) return false;
+          if (requestedEnhanceInstrumentStems && candidate.input?.enhanceInstrumentStems === false) return false;
+          return true;
+        })
+        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())[0];
+
+      if (inFlightMatch) {
+        return json({
+          ...inFlightMatch,
+          deduped: true,
+        });
+      }
+    } catch (_) { /* best effort only */ }
+
     // ── Tier gating ───────────────────────────────────────────────────────
     // Load org plan from D1 (falls back to 'free' if not found)
     let orgPlan = 'free';
