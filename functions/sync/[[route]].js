@@ -6261,6 +6261,8 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
         .filter((candidate) => {
           const status = String(candidate.status || '').toUpperCase();
           if (status !== 'PENDING' && status !== 'PROCESSING') return false;
+          const updatedAtMs = new Date(candidate.updatedAt || candidate.createdAt || 0).getTime();
+          if (updatedAtMs && Date.now() - updatedAtMs > 15 * 60 * 1000) return false;
           const candidateFileUrl = String(candidate.input?.fileUrl || candidate.input?.sourceUrl || '').trim();
           const sameSong = resolvedSongId && String(candidate.songId || '').trim() === resolvedSongId;
           const sameFile = candidateFileUrl && candidateFileUrl === String(fileUrl).trim();
@@ -6452,6 +6454,17 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
           completedAt: nowIso,
         };
         await kvPut(env, orgKey(orgId, `stems:job:${jobId}`), job);
+      } else {
+        const updatedAtMs = new Date(job.updatedAt || job.createdAt || 0).getTime();
+        if (updatedAtMs && Date.now() - updatedAtMs > 15 * 60 * 1000) {
+          job = {
+            ...job,
+            status: 'FAILED',
+            error: 'Stem job stalled before completion. Retry CineStage for this song.',
+            updatedAt: new Date().toISOString(),
+          };
+          await kvPut(env, orgKey(orgId, `stems:job:${jobId}`), job);
+        }
       }
     }
 
