@@ -6367,29 +6367,26 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     let queued = false;
     let directDispatchError = '';
 
-    if (env.STEM_QUEUE) {
+    try {
+      const dispatchResponse = await fetch(`${CONTAINER_URL}/jobs/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: dispatchPayload,
+      });
+      if (!dispatchResponse.ok) {
+        directDispatchError = await dispatchResponse.text().catch(() => `HTTP ${dispatchResponse.status}`);
+      }
+    } catch (error) {
+      directDispatchError = String(error?.message || error || 'dispatch failed');
+    }
+
+    if (directDispatchError && env.STEM_QUEUE) {
       try {
         await env.STEM_QUEUE.send(JSON.parse(dispatchPayload));
         queued = true;
+        directDispatchError = '';
       } catch (queueError) {
-        directDispatchError = `queue dispatch failed: ${String(queueError?.message || queueError)}`;
-      }
-    }
-
-    if (!queued) {
-      try {
-        const dispatchResponse = await fetch(`${CONTAINER_URL}/jobs/process`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: dispatchPayload,
-        });
-        if (!dispatchResponse.ok) {
-          directDispatchError = await dispatchResponse.text().catch(() => `HTTP ${dispatchResponse.status}`);
-        } else {
-          directDispatchError = '';
-        }
-      } catch (error) {
-        directDispatchError = String(error?.message || error || 'dispatch failed');
+        directDispatchError = `${directDispatchError}; queue dispatch failed: ${String(queueError?.message || queueError)}`;
       }
     }
 
@@ -6407,7 +6404,7 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
       jobType: 'STEM_SEPARATION',
       input: job.input,
       dispatch: {
-        direct: !queued && !directDispatchError,
+        direct: !directDispatchError,
         queued,
       },
     });
