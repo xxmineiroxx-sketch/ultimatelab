@@ -6351,7 +6351,7 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     };
     await kvPut(env, orgKey(orgId, `stems:job:${jobId}`), job);
 
-    const CONTAINER_URL = 'https://cinestage.studio-cinestage.workers.dev';
+    const CONTAINER_URL = String(env.CINESTAGE_BASE_URL || 'https://cinestage.ultimatelabs.co').replace(/\/+$/, '');
     const dispatchPayload = JSON.stringify({
       jobId,
       orgId,
