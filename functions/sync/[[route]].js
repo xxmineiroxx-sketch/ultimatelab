@@ -4163,7 +4163,7 @@ export async function onRequest(context) {
   // ── POST /sync/publish ───────────────────────────────────────────────────
   if (route === 'publish' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
-    const { serviceId, plan, vocalAssignments } = body;
+    const { serviceId, plan, vocalAssignments, service: incomingService } = body;
     if (!serviceId) return json({ error: 'serviceId required' }, 400);
 
     const [services, plans, people, pushDevices] = await Promise.all([
@@ -4173,7 +4173,17 @@ export async function onRequest(context) {
       getPushDevices(env, orgId),
     ]);
     const svcIdx = services.findIndex(s => s.id === serviceId);
-    const updated = svcIdx >= 0 ? { ...services[svcIdx] } : { id: serviceId };
+    // If service doesn't exist in KV yet (backgroundSync hasn't run), seed it with
+    // the metadata the client sent so assignments endpoint can show name + date.
+    const updated = svcIdx >= 0
+      ? { ...services[svcIdx] }
+      : {
+          id:   serviceId,
+          name: incomingService?.name || incomingService?.title || 'Service',
+          date: incomingService?.date || incomingService?.serviceDate || '',
+          time: incomingService?.time || incomingService?.startTime  || '',
+          type: incomingService?.type || 'standard',
+        };
     const existingServicePlan = updated.plan && typeof updated.plan === 'object'
       ? updated.plan
       : {};
@@ -5227,6 +5237,7 @@ export async function onRequest(context) {
       ]);
       return {
         ...b,
+        orgId: b.branchId,   // expose orgId alias alongside branchId
         memberCount: people.length,
         songCount: Object.keys(songMap).length,
         serviceCount: services.length,
@@ -6820,19 +6831,32 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
     const idx = pending.findIndex(s => s.id === id);
     if (idx === -1) return json({ error: 'Pending service not found' }, 404);
     const [svc] = pending.splice(idx, 1);
-    // Promote to live services list
-    const lib = await kvGet(env, orgKey(orgId, 'library'), { services: [], people: [], plans: {}, songs: [], blockouts: [] });
-    if (!Array.isArray(lib.services)) lib.services = [];
+    // Promote to the 'services' KV key — the same key library-pull reads from
+    const existingServices = await kvGet(env, orgKey(orgId, 'services'), []);
     const liveId = svc.id.replace('psvc_', 'svc_');
-    lib.services.push({
-      id: liveId, name: svc.name, date: svc.date, time: svc.time,
-      serviceType: svc.type, notes: svc.notes,
-      created_by_email: svc.created_by_email, created_by_name: svc.created_by_name,
+    const liveSvc = {
+      id: liveId,
+      title: svc.name,
+      name: svc.name,
+      date: svc.date,
+      time: svc.time,
+      serviceType: svc.type || 'standard',
+      type: svc.type || 'standard',
+      notes: svc.notes || '',
+      status: 'draft',
+      created_by_email: svc.created_by_email,
+      created_by_name: svc.created_by_name,
       approvedAt: new Date().toISOString(),
-    });
+    };
+    const alreadyIdx = existingServices.findIndex(s => s.id === liveId);
+    if (alreadyIdx >= 0) {
+      existingServices[alreadyIdx] = { ...existingServices[alreadyIdx], ...liveSvc };
+    } else {
+      existingServices.push(liveSvc);
+    }
     await Promise.all([
       kvPut(env, orgKey(orgId, 'pending_services'), pending),
-      kvPut(env, orgKey(orgId, 'library'), lib),
+      kvPut(env, orgKey(orgId, 'services'), existingServices),
     ]);
     return json({ ok: true, id: liveId });
   }
@@ -7307,6 +7331,267 @@ Respond ONLY with a JSON object (no markdown, no code block) in this exact shape
         body: JSON.stringify(body),
       })
     );
+  }
+
+  // ── POST /sync/live-cue — leader pushes a live section cue ─────────────────
+  if (route === 'live-cue' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const { type, sectionLabel, songId, timestamp } = body;
+    if (!sectionLabel) return json({ error: 'sectionLabel required' }, 400);
+    const cue = { type: type || 'SECTION_CUE', sectionLabel, songId: songId || '', timestamp: timestamp || Date.now() };
+    await env.STORE.put(orgKey(orgId, 'live_cue'), JSON.stringify(cue), { expirationTtl: 300 });
+    return json({ ok: true, cue });
+  }
+
+  // ── GET /sync/live-cue — musicians poll for the latest section cue ──────────
+  if (route === 'live-cue' && method === 'GET') {
+    const cue = await kvGet(env, orgKey(orgId, 'live_cue'), null);
+    if (!cue) return json({ type: null });
+    return json(cue);
+  }
+
+  // ── POST /sync/live-status — mark a service as live (or not) ─────────────────
+  if (route === 'live-status' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const { isLive, serviceId: svcId } = body;
+    if (!svcId) return json({ error: 'serviceId required' }, 400);
+    const kvKey = `org:${orgId}:live-status:${svcId}`;
+    const payload = { isLive: !!isLive, serviceId: svcId, updatedAt: Date.now() };
+    await env.STORE.put(kvKey, JSON.stringify(payload), { expirationTtl: 14400 }); // 4 hours
+    return json({ ok: true });
+  }
+
+  // ── GET /sync/live-status — check whether a service is currently live ────────
+  if (route === 'live-status' && method === 'GET') {
+    const url = new URL(request.url);
+    const svcId = url.searchParams.get('serviceId');
+    if (!svcId) return json({ error: 'serviceId required' }, 400);
+    const kvKey = `org:${orgId}:live-status:${svcId}`;
+    const raw = await env.STORE.get(kvKey);
+    if (!raw) return json({ isLive: false });
+    return json(JSON.parse(raw));
+  }
+
+  // ── DELETE /sync/live-status — clear live status for a service ───────────────
+  if (route === 'live-status' && method === 'DELETE') {
+    const url = new URL(request.url);
+    const svcId = url.searchParams.get('serviceId');
+    if (!svcId) return json({ error: 'serviceId required' }, 400);
+    const kvKey = `org:${orgId}:live-status:${svcId}`;
+    await env.STORE.delete(kvKey);
+    return json({ ok: true });
+  }
+
+  // ── POST /sync/collab/join — register presence for a collaborator ─────────────
+  if (route === 'collab/join' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const { serviceId: svcId, userId, name, role } = body;
+    if (!svcId || !userId) return json({ error: 'serviceId and userId required' }, 400);
+    const kvKey = `org:${orgId}:collab:${svcId}:presence:${userId}`;
+    const payload = { userId, name: name || '', role: role || '', joinedAt: Date.now(), lastSeen: Date.now() };
+    await env.STORE.put(kvKey, JSON.stringify(payload), { expirationTtl: 60 }); // 60s TTL
+    return json({ ok: true });
+  }
+
+  // ── POST /sync/collab/leave — remove presence for a collaborator ──────────────
+  if (route === 'collab/leave' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const { serviceId: svcId, userId } = body;
+    if (!svcId || !userId) return json({ error: 'serviceId and userId required' }, 400);
+    const kvKey = `org:${orgId}:collab:${svcId}:presence:${userId}`;
+    await env.STORE.delete(kvKey);
+    return json({ ok: true });
+  }
+
+  // ── GET /sync/collab/presence — list active collaborators for a service ───────
+  if (route === 'collab/presence' && method === 'GET') {
+    const url = new URL(request.url);
+    const svcId = url.searchParams.get('serviceId');
+    if (!svcId) return json({ error: 'serviceId required' }, 400);
+    const prefix = `org:${orgId}:collab:${svcId}:presence:`;
+    const listResult = await env.STORE.list({ prefix });
+    const now = Date.now();
+    const STALE_MS = 30_000; // 30 seconds
+    const users = [];
+    await Promise.all(
+      listResult.keys.map(async ({ name: k }) => {
+        const raw = await env.STORE.get(k);
+        if (!raw) return;
+        try {
+          const entry = JSON.parse(raw);
+          if (now - entry.lastSeen <= STALE_MS) users.push(entry);
+        } catch (_) { /* skip malformed */ }
+      })
+    );
+    return json({ users });
+  }
+
+  // ── POST /sync/collab/patch — append a collaborative patch to the patch log ───
+  if (route === 'collab/patch' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const { serviceId: svcId, patch } = body;
+    if (!svcId || !patch) return json({ error: 'serviceId and patch required' }, 400);
+    const kvKey = `org:${orgId}:collab:${svcId}:patches`;
+    const raw = await env.STORE.get(kvKey);
+    const patches = raw ? JSON.parse(raw) : [];
+    const newPatch = { ...patch, patchId: patch.patchId || `${Date.now()}-${Math.random().toString(36).slice(2)}`, ts: patch.ts || Date.now() };
+    patches.push(newPatch);
+    const trimmed = patches.slice(-50); // keep last 50
+    await env.STORE.put(kvKey, JSON.stringify(trimmed));
+    return json({ ok: true, patchId: newPatch.patchId });
+  }
+
+  // ── GET /sync/collab/patches — retrieve patches since a given timestamp ───────
+  if (route === 'collab/patches' && method === 'GET') {
+    const url = new URL(request.url);
+    const svcId = url.searchParams.get('serviceId');
+    const since = parseInt(url.searchParams.get('since') || '0', 10);
+    if (!svcId) return json({ error: 'serviceId required' }, 400);
+    const kvKey = `org:${orgId}:collab:${svcId}:patches`;
+    const raw = await env.STORE.get(kvKey);
+    const all = raw ? JSON.parse(raw) : [];
+    const patches = all.filter(p => (p.ts || 0) > since);
+    return json({ patches });
+  }
+
+  // ── GET /sync/branches/aggregate — merged library from parent + all branches ─
+  // Returns up to 500 items total (songs + people) across all child orgs.
+  if (route === 'branches/aggregate' && method === 'GET') {
+    const branches = await kvGet(env, orgKey(orgId, 'branches'), []);
+    const ITEM_CAP = 500;
+    const allSongs = [];
+    const allPeople = [];
+
+    // Include parent org itself
+    const [parentSongMap, parentPeople] = await Promise.all([
+      kvGet(env, orgKey(orgId, 'songLibrary'), {}),
+      kvGet(env, orgKey(orgId, 'people'), []),
+    ]);
+    for (const song of Object.values(parentSongMap)) {
+      allSongs.push({ ...song, org_id: orgId, org_name: org.name || '' });
+    }
+    for (const person of parentPeople) {
+      allPeople.push({ ...person, org_id: orgId, org_name: org.name || '' });
+    }
+
+    // Collect from each child branch
+    for (const b of branches) {
+      const childOrgId = b.branchId;
+      const childName = b.name || childOrgId;
+      const [childSongMap, childPeople] = await Promise.all([
+        kvGet(env, orgKey(childOrgId, 'songLibrary'), {}),
+        kvGet(env, orgKey(childOrgId, 'people'), []),
+      ]);
+      for (const song of Object.values(childSongMap)) {
+        allSongs.push({ ...song, org_id: childOrgId, org_name: childName });
+      }
+      for (const person of childPeople) {
+        allPeople.push({ ...person, org_id: childOrgId, org_name: childName });
+      }
+      if (allSongs.length + allPeople.length >= ITEM_CAP) break;
+    }
+
+    // Enforce hard cap
+    const totalCap = ITEM_CAP;
+    const songs = allSongs.slice(0, Math.min(allSongs.length, totalCap));
+    const remaining = Math.max(0, totalCap - songs.length);
+    const people = allPeople.slice(0, remaining);
+
+    return json({ songs, people, branchCount: branches.length + 1 });
+  }
+
+  // ── POST /sync/branches/:childOrgId/push-library — push songs to a branch ─
+  // Parent org pushes songs into a child org's library (merge by id).
+  if (route.startsWith('branches/') && route.endsWith('/push-library') && method === 'POST') {
+    const routeParts = route.split('/');
+    // Expected: branches/{childOrgId}/push-library  → parts[0]='branches', parts[1]=childOrgId, parts[2]='push-library'
+    const childOrgId = routeParts[1];
+    if (!childOrgId || routeParts.length !== 3) {
+      return json({ error: 'Invalid route. Expected branches/{childOrgId}/push-library' }, 400);
+    }
+
+    // Verify caller is the parent of the target child
+    const branchList = await kvGet(env, orgKey(orgId, 'branches'), []);
+    if (!branchList.find(b => b.branchId === childOrgId)) {
+      return json({ error: 'Branch not found in this organization' }, 403);
+    }
+
+    const body = await request.json().catch(() => ({}));
+    const songsToPush = Array.isArray(body.songs) ? body.songs : [];
+    if (!songsToPush.length) return json({ error: 'songs array is required and must be non-empty' }, 400);
+
+    // Read child's current library, merge, write back
+    const childSongMap = await kvGet(env, orgKey(childOrgId, 'songLibrary'), {});
+    for (const song of songsToPush) {
+      if (!song || !song.id) continue;
+      childSongMap[song.id] = { ...childSongMap[song.id], ...song, shared_from_parent: true };
+    }
+    await kvPut(env, orgKey(childOrgId, 'songLibrary'), childSongMap);
+
+    trackEvent(env, orgId, 'branch_push_library', { childOrgId, pushed: songsToPush.length });
+    return json({ ok: true, pushed: songsToPush.length });
+  }
+
+  // ── PATCH /sync/branches/:childOrgId/settings — update a branch's settings ─
+  // Parent org merges arbitrary settings into a child org's settings KV.
+  if (route.startsWith('branches/') && route.endsWith('/settings') && method === 'PATCH') {
+    const routeParts = route.split('/');
+    // Expected: branches/{childOrgId}/settings  → parts[0]='branches', parts[1]=childOrgId, parts[2]='settings'
+    const childOrgId = routeParts[1];
+    if (!childOrgId || routeParts.length !== 3) {
+      return json({ error: 'Invalid route. Expected branches/{childOrgId}/settings' }, 400);
+    }
+
+    // Verify caller is the parent of the target child
+    const branchList = await kvGet(env, orgKey(orgId, 'branches'), []);
+    if (!branchList.find(b => b.branchId === childOrgId)) {
+      return json({ error: 'Branch not found in this organization' }, 403);
+    }
+
+    const patch = await request.json().catch(() => ({}));
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      return json({ error: 'Request body must be a settings object' }, 400);
+    }
+
+    // Merge into child's settings
+    const existing = await kvGet(env, orgKey(childOrgId, 'settings'), {});
+    const merged = { ...existing, ...patch, updatedAt: new Date().toISOString(), updatedByParent: orgId };
+    await kvPut(env, orgKey(childOrgId, 'settings'), merged);
+
+    trackEvent(env, orgId, 'branch_settings_update', { childOrgId, keys: Object.keys(patch) });
+    return json({ ok: true });
+  }
+
+  // ── GET /sync/org/plan — return plan/seat info for the authenticated org ──
+  if (route === 'org/plan' && method === 'GET') {
+    const settings = await kvGet(env, orgKey(orgId, 'settings'), {});
+    const planTier = settings.planTier || 'free';
+    const maxSeats = settings.maxSeats || null;
+
+    // Count active seats: people who have logged in (have a passwordHash in their org user record)
+    let activeSeats = 0;
+    try {
+      const people = await kvGet(env, orgKey(orgId, 'people'), []);
+      // A "seat" is any person record that has a linked user account (email with passwordHash stored)
+      const userKeys = people
+        .filter(p => p.email)
+        .map(p => `user:${orgId}:${p.email.toLowerCase().trim()}`);
+      if (userKeys.length) {
+        const userChecks = await Promise.all(userKeys.map(k => env.STORE.get(k)));
+        activeSeats = userChecks.filter(Boolean).length;
+      }
+    } catch (_) { /* non-fatal */ }
+
+    // Feature flags by tier
+    const TIER_FEATURES = {
+      free:     ['library', 'services', 'people', 'setlist'],
+      standard: ['library', 'services', 'people', 'setlist', 'stems_basic', 'reporting'],
+      pro:      ['library', 'services', 'people', 'setlist', 'stems_advanced', 'reporting', 'branches', 'ai_charts', 'midi'],
+      enterprise: ['library', 'services', 'people', 'setlist', 'stems_advanced', 'reporting', 'branches', 'ai_charts', 'midi', 'cross_org', 'white_label'],
+    };
+    const features = TIER_FEATURES[planTier] || TIER_FEATURES.free;
+
+    return json({ planTier, maxSeats, activeSeats, features });
   }
 
   return json({ error: 'Not found', route }, 404);
