@@ -1,107 +1,95 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { Zap, Shield, Code, Cloud, Cpu, Users } from 'lucide-react'
+import { CalendarDays, Users, Music2, Radio, Building2, BarChart3 } from 'lucide-react'
 
-const features = [
+const FEATURES = [
   {
-    icon: Cpu,
-    title: 'AI-Powered',
-    description: '14 specialized AI engines for music analysis, mixing, and production assistance.',
-    color: 'text-purple-400',
+    icon: CalendarDays,
+    title: 'Service Planning',
+    description: 'Build setlists, assign keys and roles to each song, lock the plan when ready, and publish to the entire team in one tap.',
+    accent: '#6366F1',
   },
   {
-    icon: Zap,
-    title: 'Real-Time Processing',
-    description: 'WebSocket connectivity for live collaboration and real-time audio analysis.',
-    color: 'text-yellow-400',
-  },
-  {
-    icon: Shield,
-    title: 'Secure & Reliable',
-    description: 'Enterprise-grade security with JWT authentication and role-based access control.',
-    color: 'text-green-400',
-  },
-  {
-    icon: Cloud,
-    title: 'Cloud Native',
-    description: 'Built for scale with Docker, Kubernetes, and Helm deployments.',
-    color: 'text-blue-400',
+    icon: Music2,
+    title: 'AI Stem Separation',
+    description: 'Upload any song and get 6 separated stem tracks in minutes — vocals, harmonies, keys, guitar, bass, drums — perfect for individual practice.',
+    accent: '#8B5CF6',
   },
   {
     icon: Users,
-    title: 'Collaborative',
-    description: 'Real-time collaboration features for teams and remote production.',
-    color: 'text-pink-400',
+    title: 'Team Coordination',
+    description: 'Assign roles, send availability requests, track blockouts, and get real-time coverage forecasts before each service.',
+    accent: '#EC4899',
   },
   {
-    icon: Code,
-    title: 'Developer Friendly',
-    description: 'RESTful APIs, WebSocket endpoints, and comprehensive documentation.',
-    color: 'text-cyan-400',
+    icon: Radio,
+    title: 'Live Sunday Mode',
+    description: 'Lead your band in real time — tap a section and every musician\'s screen syncs instantly. Section cues, tempo, and transitions all coordinated.',
+    accent: '#F59E0B',
+  },
+  {
+    icon: Building2,
+    title: 'Multi-Campus Management',
+    description: 'Manage all campus locations from a central dashboard. Push your song library and standards to every campus. Each location stays autonomous.',
+    accent: '#10B981',
+  },
+  {
+    icon: BarChart3,
+    title: 'Analytics & Insights',
+    description: 'See which songs you use most, track team attendance trends, and measure role coverage across your organization over time.',
+    accent: '#0EA5E9',
   },
 ]
 
 export default function Features() {
   return (
-    <section id="features" className="py-20 px-4 sm:px-6 lg:px-8 bg-gradient-to-b from-gray-900/50 to-black">
+    <section id="features" className="py-24 px-4 sm:px-6 lg:px-8 bg-[#0A0F1E]">
       <div className="max-w-7xl mx-auto">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
-          transition={{ duration: 0.6 }}
           className="text-center mb-16"
         >
-          <h2 className="text-4xl md:text-5xl font-bold mb-6">
-            Why Choose <span className="gradient-text">Ultimatelab</span>?
+          <span className="inline-block px-3 py-1 mb-4 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-sm font-medium">
+            Everything You Need
+          </span>
+          <h2 className="text-4xl md:text-5xl font-black text-white mb-4">
+            Built for how{' '}
+            <span className="bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
+              worship teams actually work
+            </span>
           </h2>
-          <p className="text-xl text-gray-400 max-w-3xl mx-auto">
-            Built by musicians for musicians, our ecosystem combines cutting-edge AI 
-            with intuitive design to supercharge your creative process.
+          <p className="text-lg text-slate-400 max-w-2xl mx-auto">
+            Not a generic project management tool. Purpose-built for church music departments, worship directors, and multi-campus organizations.
           </p>
         </motion.div>
 
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-          {features.map((feature, index) => {
-            const Icon = feature.icon
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {FEATURES.map((f, i) => {
+            const Icon = f.icon
             return (
               <motion.div
-                key={feature.title}
-                initial={{ opacity: 0, y: 30 }}
+                key={f.title}
+                initial={{ opacity: 0, y: 20 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
-                transition={{ duration: 0.6, delay: index * 0.1 }}
-                className="text-center group"
+                transition={{ duration: 0.5, delay: i * 0.08 }}
+                className="group relative bg-[#0F172A] border border-white/5 rounded-2xl p-6 hover:border-white/10 transition-all hover:-translate-y-0.5"
               >
-                <div className="inline-block p-4 bg-gray-800/50 rounded-2xl mb-6 group-hover:bg-gray-800/70 transition-all">
-                  <Icon className={`w-8 h-8 ${feature.color}`} />
+                <div
+                  className="w-10 h-10 rounded-xl flex items-center justify-center mb-4"
+                  style={{ backgroundColor: `${f.accent}20` }}
+                >
+                  <Icon className="w-5 h-5" style={{ color: f.accent }} />
                 </div>
-                <h3 className="text-xl font-bold mb-4">{feature.title}</h3>
-                <p className="text-gray-400">{feature.description}</p>
+                <h3 className="text-lg font-bold text-white mb-2">{f.title}</h3>
+                <p className="text-slate-400 text-sm leading-relaxed">{f.description}</p>
               </motion.div>
             )
           })}
         </div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.8, delay: 0.3 }}
-          className="mt-20 text-center"
-        >
-          <div className="bg-gradient-to-r from-purple-900/20 to-blue-900/20 rounded-2xl p-8 border border-purple-500/20">
-            <h3 className="text-2xl font-bold mb-4">Ready to Transform Your Music Production?</h3>
-            <p className="text-gray-300 mb-8 max-w-2xl mx-auto">
-              Join thousands of musicians, producers, and audio engineers who are already 
-              using Ultimatelabs to create amazing music.
-            </p>
-            <button className="px-8 py-4 bg-gradient-to-r from-purple-600 to-blue-600 rounded-lg font-semibold text-lg hover:from-purple-700 hover:to-blue-700 transition-all transform hover:scale-105">
-              Get Started Today
-            </button>
-          </div>
-        </motion.div>
       </div>
     </section>
   )

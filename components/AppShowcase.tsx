@@ -1,63 +1,77 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { Smartphone, Monitor, Download, ExternalLink } from 'lucide-react'
+import { Smartphone, Tablet, ArrowRight } from 'lucide-react'
 
-const apps = [
+const APPS = [
   {
     id: 'musician',
+    badge: 'Worship Leader & Admin',
     name: 'Ultimate Musician',
-    description: 'Your all-in-one music companion for practice, performance, and creation.',
-    features: [
-      'Sheet music library and organization',
-      'Practice tracking and metronome',
-      'Setlist management for live shows',
-      'Integration with Ultimate Playback',
+    tagline: 'Plan. Coordinate. Lead.',
+    description:
+      'The command center for worship directors. Build service plans, manage your team calendar, push assignments, and run multi-campus operations — all from your iPad or Mac.',
+    highlights: [
+      'Drag-and-drop service planning',
+      'Smart team availability view',
+      'One-tap publish to all members',
+      'Multi-campus central admin hub',
     ],
-    platform: 'macOS',
-    status: 'available',
-    icon: Monitor,
-    gradient: 'from-blue-500 to-cyan-600',
+    platform: 'iPad · iPhone · Mac',
+    status: 'Available',
+    statusColor: 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20',
+    icon: Tablet,
+    gradient: 'from-indigo-600 to-blue-600',
+    glowColor: 'bg-indigo-600/15',
   },
   {
     id: 'playback',
-    name: 'Ultimate Playback (Cinestage)',
-    description: 'AI-powered music production assistant with 14 specialized engines.',
-    features: [
-      'AI mixing and mastering analysis',
-      '14 specialized AI engines',
-      'Real-time audio processing',
-      'WebSocket connectivity for live collaboration',
+    badge: 'Musicians & Vocalists',
+    name: 'Ultimate Playback',
+    tagline: 'Practice. Perform. Flow.',
+    description:
+      'Every team member\'s personal rehearsal companion. See your part, hear your stem track, follow live section cues from the worship leader, and show lyrics to the congregation.',
+    highlights: [
+      'Personal stem track practice',
+      'Live section cue display',
+      'Chord charts with key transposition',
+      'Congregation lyric display mode',
     ],
-    platform: 'Web/Mobile',
-    status: 'beta',
+    platform: 'iPhone · iPad · Android',
+    status: 'Available',
+    statusColor: 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20',
     icon: Smartphone,
-    gradient: 'from-purple-500 to-pink-600',
+    gradient: 'from-purple-600 to-pink-600',
+    glowColor: 'bg-purple-600/15',
   },
 ]
 
 export default function AppShowcase() {
   return (
-    <section id="apps" className="py-20 px-4 sm:px-6 lg:px-8">
+    <section id="apps" className="py-24 px-4 sm:px-6 lg:px-8 bg-[#020617]">
       <div className="max-w-7xl mx-auto">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
-          transition={{ duration: 0.6 }}
           className="text-center mb-16"
         >
-          <h2 className="text-4xl md:text-5xl font-bold mb-6">
-            Our <span className="gradient-text">Applications</span>
+          <span className="inline-block px-3 py-1 mb-4 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-sm font-medium">
+            Two Apps, One Platform
+          </span>
+          <h2 className="text-4xl md:text-5xl font-black text-white mb-4">
+            The right tool for{' '}
+            <span className="bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+              every role
+            </span>
           </h2>
-          <p className="text-xl text-gray-400 max-w-3xl mx-auto">
-            Two powerful tools designed to work seamlessly together, 
-            creating the ultimate music production ecosystem.
+          <p className="text-lg text-slate-400 max-w-2xl mx-auto">
+            Leaders plan from Ultimate Musician. Musicians and vocalists rehearse and perform from Ultimate Playback. Built to work together seamlessly.
           </p>
         </motion.div>
 
-        <div className="grid md:grid-cols-2 gap-8 lg:gap-12">
-          {apps.map((app, index) => {
+        <div className="grid md:grid-cols-2 gap-8">
+          {APPS.map((app, i) => {
             const Icon = app.icon
             return (
               <motion.div
@@ -65,55 +79,50 @@ export default function AppShowcase() {
                 initial={{ opacity: 0, y: 30 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
-                transition={{ duration: 0.6, delay: index * 0.2 }}
-                className="group relative"
+                transition={{ duration: 0.6, delay: i * 0.15 }}
+                className="relative group"
               >
-                <div className={`absolute inset-0 bg-gradient-to-r ${app.gradient} rounded-2xl blur-xl opacity-20 group-hover:opacity-30 transition-opacity`} />
-                
-                <div className="relative bg-gray-900/50 backdrop-blur-sm border border-gray-800 rounded-2xl p-8 hover:border-gray-700 transition-all">
-                  <div className="flex items-start space-x-4 mb-6">
-                    <div className={`p-3 bg-gradient-to-r ${app.gradient} rounded-xl`}>
-                      <Icon className="w-8 h-8 text-white" />
+                {/* Glow */}
+                <div className={`absolute inset-0 ${app.glowColor} rounded-3xl blur-2xl opacity-60 group-hover:opacity-80 transition-opacity`} />
+
+                <div className="relative bg-[#0F172A] border border-white/8 rounded-3xl p-8 overflow-hidden hover:border-white/12 transition-colors">
+                  {/* Top row */}
+                  <div className="flex items-start justify-between mb-6">
+                    <div>
+                      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{app.badge}</span>
+                      <h3 className="text-2xl font-black text-white mt-1">{app.name}</h3>
+                      <p className="text-base font-medium text-slate-400 mt-0.5">{app.tagline}</p>
                     </div>
-                    <div className="flex-1">
-                      <h3 className="text-2xl font-bold mb-2">{app.name}</h3>
-                      <span className={`inline-block px-3 py-1 text-xs font-semibold rounded-full ${
-                        app.status === 'available' 
-                          ? 'bg-green-500/20 text-green-400' 
-                          : 'bg-yellow-500/20 text-yellow-400'
-                      }`}>
-                        {app.status === 'available' ? 'Available Now' : 'In Beta'}
-                      </span>
+                    <div className={`p-3 bg-gradient-to-br ${app.gradient} rounded-2xl`}>
+                      <Icon className="w-6 h-6 text-white" />
                     </div>
                   </div>
 
-                  <p className="text-gray-300 mb-6 text-lg">
-                    {app.description}
-                  </p>
+                  <p className="text-slate-400 mb-6 leading-relaxed">{app.description}</p>
 
-                  <ul className="space-y-3 mb-8">
-                    {app.features.map((feature, idx) => (
-                      <li key={idx} className="flex items-start space-x-3">
-                        <div className={`w-2 h-2 rounded-full bg-gradient-to-r ${app.gradient} mt-2 flex-shrink-0`} />
-                        <span className="text-gray-400">{feature}</span>
+                  {/* Highlights */}
+                  <ul className="space-y-2.5 mb-8">
+                    {app.highlights.map((h) => (
+                      <li key={h} className="flex items-center gap-3 text-sm text-slate-300">
+                        <div className={`w-1.5 h-1.5 rounded-full bg-gradient-to-r ${app.gradient} flex-shrink-0`} />
+                        {h}
                       </li>
                     ))}
                   </ul>
 
-                  <div className="flex flex-col sm:flex-row gap-4">
-                    <button className={`flex-1 px-6 py-3 bg-gradient-to-r ${app.gradient} rounded-lg font-semibold hover:opacity-90 transition-opacity flex items-center justify-center space-x-2`}>
-                      <Download className="w-5 h-5" />
-                      <span>Download</span>
-                    </button>
-                    <button className="px-6 py-3 border border-gray-600 rounded-lg font-semibold hover:bg-white/5 transition-all flex items-center justify-center space-x-2">
-                      <ExternalLink className="w-5 h-5" />
-                      <span>Learn More</span>
+                  {/* Footer row */}
+                  <div className="flex items-center justify-between pt-4 border-t border-white/5">
+                    <div>
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${app.statusColor}`}>
+                        <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                        {app.status}
+                      </span>
+                      <p className="text-xs text-slate-600 mt-1.5">{app.platform}</p>
+                    </div>
+                    <button className={`inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r ${app.gradient} text-white text-sm font-semibold rounded-xl hover:opacity-90 transition-opacity`}>
+                      Learn More <ArrowRight className="w-3.5 h-3.5" />
                     </button>
                   </div>
-
-                  <p className="text-sm text-gray-500 mt-4">
-                    Platform: {app.platform}
-                  </p>
                 </div>
               </motion.div>
             )
